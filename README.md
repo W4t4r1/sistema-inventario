@@ -1,51 +1,42 @@
-# 🏭 Sistema de Gestión de Inventarios - Mayólicas y Sanitarios
+# 🏭 Sistema ERP de Inventarios: Distribuidora de Acabados
 
-Aplicación web interactiva para el control de stock, gestión de productos y generación de reportes en tiempo real para un negocio de materiales de construcción.
+![Status](https://img.shields.io/badge/Estado-Producción-brightgreen)
+![Python](https://img.shields.io/badge/Python-3.12-blue)
+![Streamlit](https://img.shields.io/badge/Frontend-Streamlit-red)
+![Database](https://img.shields.io/badge/Database-Google%20Sheets-green)
+![Storage](https://img.shields.io/badge/Storage-ImgBB-orange)
 
-## 🚀 Características Principales
+Sistema de gestión de inventarios en la nube (Cloud ERP) diseñado a medida para la administración de productos de acabados de construcción (Marcas **Celima, Trebol**, etc.). 
 
-* **Gestión CRUD Completa:** Registro, lectura, actualización y control de productos.
-* **Inventario Visual:** Carga y visualización de imágenes reales de los productos (Mayólicas, Sanitarios, Grifería).
-* **Alertas Inteligentes:** Indicadores visuales y métricas automáticas para stock crítico.
-* **Reportes Ejecutivos:** Exportación de inventario a Excel (.xlsx) con formato profesional e imágenes incrustadas.
-* **Base de Datos Relacional:** Persistencia de datos mediante SQLite.
+El sistema resuelve el problema de la **persistencia de datos y accesibilidad remota** integrando múltiples APIs gratuitas para operar sin costos de servidor.
 
-## 🛠️ Tecnologías Utilizadas
+## 🚀 Demo en Vivo
 
-Este proyecto fue construido utilizando un stack tecnológico eficiente y escalable basado en Python:
+👉 **[Acceder al Sistema aquí](https://inventario-ledisa.streamlit.app/)**
+*(Nota: Se requiere contraseña de acceso para editar datos)*
 
-* **Python 3.12+**: Lógica de negocio.
-* **Streamlit**: Framework para la interfaz web interactiva.
-* **Pandas**: Manipulación y análisis de datos.
-* **SQLite3**: Base de datos ligera y serverless.
-* **OpenPyXL**: Motor de generación de reportes Excel avanzados.
+## 📸 Capturas de Pantalla
 
-## ⚙️ Instalación y Uso Local
+| Dashboard de Stock | Registro con Foto |
+|:---:|:---:|
+| ![Dashboard](https://i.ibb.co/SX6qj0TP/image.png) | ![Registro](https://i.ibb.co/C3st9ZwJ/image.png) |
+*(El sistema visualiza KPIs financieros y stock físico en tiempo real)*
 
-Si deseas ejecutar este proyecto en tu máquina local:
+## 🛠️ Arquitectura Técnica
 
-1.  **Clonar el repositorio:**
-    ```bash
-    git clone [https://github.com/TU_USUARIO/sistema-inventario-mayolicas.git](https://github.com/TU_USUARIO/sistema-inventario-mayolicas.git)
-    cd sistema-inventario-mayolicas
-    ```
+El proyecto utiliza una arquitectura **Serverless** desacoplada:
 
-2.  **Instalar dependencias:**
-    ```bash
-    pip install -r requirements.txt
-    ```
+* **Frontend:** `Streamlit` (Interfaz Web Reactiva).
+* **Backend Logic:** `Python` (Pandas para manipulación de datos).
+* **Base de Datos:** `Google Sheets API` (Persistencia de datos estructurados).
+* **Almacenamiento de Medios:** `ImgBB API` (Hosting de imágenes permanente).
+* **Autenticación:** Sistema de Login simple basado en secretos de entorno.
 
-3.  **Ejecutar la aplicación:**
-    ```bash
-    python -m streamlit run app_inventario.py
-    ```
-
-## 📂 Estructura del Proyecto
-
-* `app_inventario.py`: Código fuente principal (Frontend + Backend).
-* `mi_inventario.db`: Base de datos SQLite (se genera automáticamente si no existe).
-* `imagenes/`: Carpeta de almacenamiento para las fotos de los productos.
-* `requirements.txt`: Lista de dependencias del proyecto.
-
----
-**Desarrollado por:** Huanca Achahui, Marco Antonio - Estudiante de Ingeniería de Sistemas (UNI - FIIS)
+### Flujo de Datos
+```mermaid
+graph LR
+A[Usuario Móvil] -- HTTPS --> B(Streamlit Cloud)
+B -- Read/Write JSON --> C{Google Sheets}
+B -- Upload Image --> D[ImgBB Cloud]
+D -- Return URL --> B
+B -- Generate .xlsx --> E[Reporte Excel]
