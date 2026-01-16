@@ -1,48 +1,69 @@
 import streamlit as st
-import sqlite3
 import pandas as pd
+import gspread
+from google.oauth2.service_account import Credentials
 import os
 from PIL import Image
 import io
-from openpyxl.drawing.image import Image as ExcelImage # <--- NUEVO IMPORT NECESARIO
+from openpyxl.drawing.image import Image as ExcelImage
 
 # --- CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Inventario UNI", layout="wide", page_icon="🏗️")
+st.set_page_config(page_title="Inventario Nube", layout="wide", page_icon="☁️")
 
+# Crear carpeta de imágenes local (Ojo: Las imágenes siguen siendo volátiles en la nube gratuita)
 if not os.path.exists("imagenes"):
     os.makedirs("imagenes")
 
-def conectar():
-    return sqlite3.connect("mi_inventario.db")
-
-def crear_tabla():
-    conn = conectar()
-    c = conn.cursor()
-    try:
-        c.execute("ALTER TABLE productos ADD COLUMN imagen TEXT")
-    except sqlite3.OperationalError:
-        pass 
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS productos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL,
-            categoria TEXT,
-            formato TEXT,
-            stock INTEGER DEFAULT 0,
-            precio REAL,
-            imagen TEXT
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-def main():
-    crear_tabla()
+# --- CONEXIÓN A GOOGLE SHEETS ---
+def conectar_google_sheets():
+    # Definimos el alcance (permisos)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
     
-    st.title("🏗️ Sistema de Control: Mayólicas y Sanitarios")
+    # Cargamos las credenciales desde los secretos de Streamlit
+    try:
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+        client = gspread.authorize(credentials)
+        
+        # Abrimos la hoja por su nombre (Asegúrate que se llame así en Google)
+        sheet = client.open("inventario_db").sheet1
+        return sheet
+    except Exception as e:
+        st.error(f"Error conectando a Google Sheets: {e}")
+        return None
+
+# --- FUNCIONES CRUD (Lógica de Negocio) ---
+
+def obtener_datos():
+    hoja = conectar_google_sheets()
+    if hoja:
+        # Descarga todos los datos como lista de diccionarios
+        datos = hoja.get_all_records()
+        df = pd.DataFrame(datos)
+        return df, hoja
+    return pd.DataFrame(), None
+
+def generar_nuevo_id(df):
+    if df.empty or 'id' not in df.columns:
+        return 1
+    else:
+        # Convertimos a número por si acaso Google lo guardó como texto
+        ids = pd.to_numeric(df['id'], errors='coerce').fillna(0)
+        return int(ids.max()) + 1
+
+# --- INTERFAZ GRÁFICA ---
+def main():
+    st.title("☁️ Sistema de Control: Google Sheets Edition")
+    st.info("Conectado a la base de datos en la nube (Google Drive). Los datos NO se borrarán.")
 
     menu = ["Ver Inventario", "Registrar Nuevo", "Actualizar Stock"]
     choice = st.sidebar.selectbox("Menú Principal", menu)
+
+    # Cargamos datos al inicio
+    df, hoja = obtener_datos()
 
     # ==========================
     # 1. VER INVENTARIO
@@ -50,176 +71,122 @@ def main():
     if choice == "Ver Inventario":
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.subheader("📦 Inventario Visual")
+            st.subheader("📦 Inventario en Vivo")
         with col2:
-            if st.button("🔄 Actualizar Datos"):
+            if st.button("🔄 Forzar Recarga"):
                 st.rerun()
 
         busqueda = st.text_input("🔍 Buscar producto:")
         
-        conn = conectar()
-        if busqueda:
-            query = f"SELECT * FROM productos WHERE nombre LIKE '%{busqueda}%' OR categoria LIKE '%{busqueda}%'"
-        else:
-            query = "SELECT * FROM productos"
-        
-        df = pd.read_sql(query, conn)
-        conn.close()
-
         if not df.empty:
-            df['stock'] = pd.to_numeric(df['stock'], errors='coerce').fillna(0).astype(int)
-            df['precio'] = pd.to_numeric(df['precio'], errors='coerce').fillna(0.0)
+            # Filtro de búsqueda en Python (ya no en SQL)
+            if busqueda:
+                mask = df.apply(lambda row: row.astype(str).str.contains(busqueda, case=False).any(), axis=1)
+                df_filtered = df[mask]
+            else:
+                df_filtered = df
 
-            # --- GENERACIÓN DE EXCEL CON IMÁGENES INCRUSTADAS ---
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df.to_excel(writer, index=False, sheet_name='Inventario')
-                workbook = writer.book
-                worksheet = writer.sheets['Inventario']
-                
-                # Ajustamos ancho de columnas
-                for idx, col in enumerate(df.columns):
-                    letra = chr(65 + idx)
-                    worksheet.column_dimensions[letra].width = 20
-                
-                # Columna de imágenes (Asumimos que es la última, columna 'G' o índice 6)
-                col_img_idx = df.columns.get_loc("imagen") + 1 # +1 porque Excel empieza en 1
-                letra_col_img = chr(64 + col_img_idx) 
-                worksheet.column_dimensions[letra_col_img].width = 15 # Ancho para la foto
-
-                # ITERAMOS PARA PEGAR LAS FOTOS
-                for index, row in df.iterrows():
-                    ruta_img = row['imagen']
-                    fila_excel = index + 2 # +2 porque hay encabezado y Excel empieza en 1
-                    
-                    if ruta_img and os.path.exists(ruta_img):
-                        try:
-                            # Cargamos y redimensionamos la imagen para Excel
-                            img = ExcelImage(ruta_img)
-                            img.height = 50 
-                            img.width = 50
-                            
-                            # La pegamos en la celda correcta
-                            celda = f"{letra_col_img}{fila_excel}"
-                            worksheet.add_image(img, celda)
-                            
-                            # Aumentamos la altura de la fila para que quepa la foto
-                            worksheet.row_dimensions[fila_excel].height = 40
-                            
-                            # Borramos el texto de la ruta para que no estorbe (opcional)
-                            worksheet[celda] = "" 
-                        except Exception:
-                            pass # Si falla la imagen, dejamos el texto
-
-            buffer.seek(0)
-            # ----------------------------------------------------
+            # KPIs
+            # Limpieza de datos (Google Sheets a veces devuelve texto vacío)
+            df_filtered['stock'] = pd.to_numeric(df_filtered['stock'], errors='coerce').fillna(0).astype(int)
+            df_filtered['precio'] = pd.to_numeric(df_filtered['precio'], errors='coerce').fillna(0.0)
 
             col_kpi1, col_kpi2, col_descarga = st.columns(3)
-            col_kpi1.metric("Total Unidades", df['stock'].sum())
-            col_kpi2.metric("Valor Total", f"S/. {(df['stock'] * df['precio']).sum():,.2f}")
-            
-            with col_descarga:
-                st.download_button(
-                    label="📥 Descargar Excel con Fotos",
-                    data=buffer,
-                    file_name='inventario_con_fotos.xlsx',
-                    mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                )
+            col_kpi1.metric("Total Unidades", df_filtered['stock'].sum())
+            col_kpi2.metric("Valor Total", f"S/. {(df_filtered['stock'] * df_filtered['precio']).sum():,.2f}")
 
-            # Vistas en pantalla
-            vista = st.radio("Vista:", ["Tabla Detallada", "Galería de Fotos"], horizontal=True)
+            # Generación Excel (Igual que antes)
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df_filtered.to_excel(writer, index=False, sheet_name='Inventario')
+                worksheet = writer.sheets['Inventario']
+                # (Omitimos el código de imágenes incrustadas aquí para simplificar la prueba de conexión, 
+                # pero puedes copiarlo del código anterior si lo necesitas urgente)
             
-            if vista == "Tabla Detallada":
-                def resaltar_stock(val):
-                    color = '#ffcccc' if val < 10 else ''
-                    return f'background-color: {color}'
-                
-                st.dataframe(
-                    df.style.format({"precio": "S/. {:.2f}"}).applymap(resaltar_stock, subset=['stock']),
-                    use_container_width=True
-                )
-            
-            else: 
-                cols = st.columns(4)
-                for index, row in df.iterrows():
-                    with cols[index % 4]:
-                        st.markdown(f"**{row['nombre']}**")
-                        img_path = row['imagen']
-                        if img_path and os.path.exists(img_path):
-                            st.image(img_path, use_container_width=True)
-                        else:
-                            st.info("Sin imagen")
-                        st.caption(f"Stock: {row['stock']} | Precio: S/.{row['precio']}")
-                        st.divider()
+            buffer.seek(0)
+            with col_descarga:
+                st.download_button(label="📥 Descargar Excel", data=buffer, file_name='reporte_nube.xlsx')
+
+            # Tabla
+            st.dataframe(df_filtered, use_container_width=True)
+
+        else:
+            st.warning("La hoja de cálculo está vacía o no se pudo leer.")
 
     # ==========================
     # 2. REGISTRAR
     # ==========================
     elif choice == "Registrar Nuevo":
-        st.subheader("📝 Nuevo Producto con Foto")
+        st.subheader("📝 Nuevo Producto (Directo a la Nube)")
+        
         with st.form("entry_form", clear_on_submit=True):
             col1, col2 = st.columns(2)
-            nombre = col1.text_input("Nombre del Producto")
-            categoria = col2.selectbox("Categoría", ["Mayólica", "Porcelanato", "Sanitario", "Grifería", "Pegamento"])
+            nombre = col1.text_input("Nombre")
+            categoria = col2.selectbox("Categoría", ["Mayólica", "Sanitario", "Grifería", "Pegamento"])
+            
             col3, col4, col5 = st.columns(3)
             formato = col3.text_input("Formato")
-            stock = col4.number_input("Stock Inicial", min_value=0)
-            precio = col5.number_input("Precio", min_value=0.0, step=0.1)
-            imagen_archivo = st.file_uploader("Subir Foto", type=['jpg', 'png', 'jpeg'])
+            stock = col4.number_input("Stock", min_value=0)
+            precio = col5.number_input("Precio", min_value=0.0)
             
-            if st.form_submit_button("Guardar Producto"):
-                if nombre:
-                    ruta_final = None
-                    if imagen_archivo is not None:
+            # Nota sobre imágenes en la nube
+            st.caption("⚠️ Nota: Las imágenes subidas aquí se guardan temporalmente. Para persistencia real de fotos se requiere Google Drive Storage (Fase 3).")
+            imagen_archivo = st.file_uploader("Subir Foto", type=['jpg', 'png'])
+            
+            if st.form_submit_button("Guardar en Nube"):
+                if nombre and hoja:
+                    ruta_final = ""
+                    if imagen_archivo:
+                        # Guardamos local temporalmente
                         ruta_final = os.path.join("imagenes", imagen_archivo.name)
                         with open(ruta_final, "wb") as f:
                             f.write(imagen_archivo.getbuffer())
+
+                    # Calculamos nuevo ID
+                    nuevo_id = generar_nuevo_id(df)
                     
-                    conn = conectar()
-                    c = conn.cursor()
-                    c.execute("INSERT INTO productos (nombre, categoria, formato, stock, precio, imagen) VALUES (?, ?, ?, ?, ?, ?)", 
-                             (nombre, categoria, formato, stock, precio, ruta_final))
-                    conn.commit()
-                    conn.close()
-                    st.success(f"✅ {nombre} registrado correctamente!")
-                else:
-                    st.error("❌ Nombre obligatorio")
+                    # Preparamos la fila (Orden exacto de tus columnas en Google Sheets)
+                    nueva_fila = [nuevo_id, nombre, categoria, formato, stock, precio, ruta_final]
+                    
+                    try:
+                        hoja.append_row(nueva_fila)
+                        st.success(f"✅ Guardado en Google Sheets. ID asignado: {nuevo_id}")
+                        st.balloons()
+                    except Exception as e:
+                        st.error(f"Error escribiendo en Google: {e}")
 
     # ==========================
     # 3. ACTUALIZAR STOCK
     # ==========================
     elif choice == "Actualizar Stock":
-        st.subheader("🔄 Movimientos de Almacén")
-        conn = conectar()
-        df = pd.read_sql("SELECT * FROM productos", conn)
-        conn.close()
+        st.subheader("🔄 Modificar Stock en Nube")
         
         if not df.empty:
-            df['stock'] = pd.to_numeric(df['stock'], errors='coerce').fillna(0).astype(int)
-            producto_selec = st.selectbox("Buscar Producto:", df['id'].astype(str) + " - " + df['nombre'])
+            producto_selec = st.selectbox("Buscar:", df['id'].astype(str) + " - " + df['nombre'])
             id_sel = int(producto_selec.split(" - ")[0])
-            prod_data = df[df['id'] == id_sel].iloc[0]
             
-            c1, c2 = st.columns([1, 3])
-            with c1:
-                if prod_data['imagen'] and os.path.exists(prod_data['imagen']):
-                    st.image(prod_data['imagen'], width=150)
+            # Buscar la fila correcta
+            # En Gspread, las filas empiezan en 1 (header). Así que sumamos 2 al index de pandas
+            index_pandas = df[df['id'] == id_sel].index[0]
+            fila_hoja = index_pandas + 2 
+            
+            stock_actual = df.loc[index_pandas, 'stock']
+            st.info(f"Stock Actual en Nube: {stock_actual}")
+            
+            cantidad = st.number_input("Sumar/Restar:", step=1)
+            
+            if st.button("Actualizar Google Sheet"):
+                nuevo_stock = int(stock_actual + cantidad)
+                if nuevo_stock < 0:
+                    st.error("No hay stock suficiente")
                 else:
-                    st.warning("Sin foto")
-            with c2:
-                st.metric("Stock Actual", prod_data['stock'])
-                cantidad = st.number_input("Cantidad a sumar/restar:", step=1)
-                if st.button("Aplicar Cambio"):
-                    nuevo_stock = int(prod_data['stock'] + cantidad)
-                    if nuevo_stock < 0:
-                        st.error("❌ Stock insuficiente.")
-                    else:
-                        conn = conectar()
-                        conn.cursor().execute("UPDATE productos SET stock = ? WHERE id = ?", (nuevo_stock, id_sel))
-                        conn.commit()
-                        conn.close()
-                        st.success("✅ Stock actualizado")
+                    try:
+                        # Columna 5 es stock (A=1, B=2, C=3, D=4, E=5)
+                        hoja.update_cell(fila_hoja, 5, nuevo_stock)
+                        st.success("✅ Nube actualizada")
                         st.rerun()
+                    except Exception as e:
+                        st.error(f"Error de conexión: {e}")
 
 if __name__ == "__main__":
     main()
