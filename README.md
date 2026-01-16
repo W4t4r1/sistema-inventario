@@ -12,7 +12,7 @@ El sistema resuelve el problema de la **persistencia de datos y accesibilidad re
 
 ## 🚀 Demo en Vivo
 
-👉 **[Acceder al Sistema aquí](https://inventario-ledisa.streamlit.app/)**
+👉 **[Acceder al Sistema aquí](https://sistema-inventario.streamlit.app/)**
 *(Nota: Se requiere contraseña de acceso para editar datos)*
 
 ## 📸 Capturas de Pantalla
