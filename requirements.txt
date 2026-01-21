@@ -5,3 +5,5 @@ Pillow
 gspread
 google-auth
 requests
+plotly
+fpdf
