@@ -7,3 +7,4 @@ google-auth
 requests
 plotly
 fpdf
+google-generativeai

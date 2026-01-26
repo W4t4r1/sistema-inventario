@@ -9,6 +9,8 @@ import time
 import plotly.express as px
 from fpdf import FPDF
 import base64
+import google.generativeai as genai # <--- IMPORT NUEVO
+from PIL import Image # <--- IMPORT NUEVO (Para procesar imágenes)
 
 # --- CONFIGURACIÓN Y CSS HACK ---
 st.set_page_config(page_title="Inventario Ledisa", layout="wide", page_icon="🏗️")
@@ -71,6 +73,86 @@ def obtener_datos():
         except Exception:
             return pd.DataFrame(), hoja
     return pd.DataFrame(), None
+
+# --- MÓDULO: AUTO-ETIQUETADO IA ---
+def generar_tags_ia(df, hoja):
+    st.subheader("🤖 Auto-Etiquetado con Inteligencia Artificial")
+    st.info("Este proceso analizará las fotos de tus productos y generará etiquetas automáticas (tipo, color, acabado) para facilitar la búsqueda.")
+    
+    # Verificamos si existe la columna tags_ia en el DataFrame
+    if 'tags_ia' not in df.columns:
+        st.error("⚠️ No encuentro la columna 'tags_ia' en tu Excel. Por favor, créala en la Columna K (encabezado) y recarga.")
+        return
+
+    # Filtramos productos que tienen FOTO pero NO tienen TAGS
+    # (Para no gastar IA en lo que ya está listo)
+    df_pendientes = df[
+        (df['imagen'].str.startswith('http', na=False)) & 
+        ((df['tags_ia'].isna()) | (df['tags_ia'] == "") | (df['tags_ia'] == "FALSE"))
+    ]
+    
+    cantidad = len(df_pendientes)
+    st.write(f"Productos pendientes de etiquetar: **{cantidad}**")
+    
+    if cantidad > 0:
+        if st.button(f"🚀 Iniciar Escaneo IA ({cantidad} productos)"):
+            # Configurar Gemini
+            try:
+                genai.configure(api_key=st.secrets["gemini"]["api_key"])
+                model = genai.GenerativeModel('gemini-1.5-flash') # Modelo rápido y eficiente
+            except Exception as e:
+                st.error(f"Error configurando Gemini: {e}")
+                return
+
+            barra = st.progress(0)
+            log = st.empty()
+            
+            # Iteramos sobre los pendientes
+            for i, (index, row) in enumerate(df_pendientes.iterrows()):
+                id_prod = row['id']
+                nombre_prod = row['nombre']
+                url_img = row['imagen']
+                fila_sheet = index + 2  # +2 porque Excel tiene header y es base 1
+                
+                log.text(f"Analizando: {nombre_prod}...")
+                
+                try:
+                    # 1. Descargar imagen
+                    response = requests.get(url_img, stream=True)
+                    response.raise_for_status()
+                    image = Image.open(io.BytesIO(response.content))
+                    
+                    # 2. Preguntar a Gemini
+                    prompt = (
+                        "Actúa como experto en acabados de construcción. "
+                        "Analiza esta imagen de una loseta/cerámico y dame 5 a 7 palabras clave separadas por comas "
+                        "que describan: Material (madera, piedra, marmol, cemento, monocolor), "
+                        "Color principal, Tono (claro, oscuro), Acabado (mate, brillante, satinado, rustico) y Uso probable. "
+                        "Ejemplo de respuesta: madera, marron, oscuro, mate, rustico, piso, sala. "
+                        "No des explicaciones, solo las palabras."
+                    )
+                    
+                    response_ai = model.generate_content([prompt, image])
+                    tags = response_ai.text.strip()
+                    
+                    # 3. Guardar en Google Sheets (Columna 11 = K)
+                    # Asegúrate que 'tags_ia' sea la columna 11. Si agregaste m2_caja, cuenta bien las columnas.
+                    # ID(1), Nom(2), Cat(3), Mar(4), Fmt(5), M2(6), Cal(7), Stk(8), Pre(9), Img(10), TAGS(11)
+                    hoja.update_cell(fila_sheet, 11, tags)
+                    
+                except Exception as e:
+                    st.warning(f"Error con {id_prod}: {e}")
+                    continue
+                
+                # Actualizar barra
+                barra.progress((i + 1) / cantidad)
+            
+            st.success("✅ ¡Proceso Terminado! Tu inventario ahora tiene cerebro.")
+            st.balloons()
+            time.sleep(2)
+            st.rerun()
+    else:
+        st.success("¡Todo tu inventario con fotos ya está etiquetado! 🎉")
 
 # --- BARRA LATERAL DE LOGIN ---
 def sidebar_login():
@@ -412,7 +494,7 @@ def main():
     
     if es_admin:
         # Nuevo orden sugerido
-        menu = ["Ver Inventario", "Cotizador PDF", "Calculadora de Obra", "Dashboard Gerencial", "Registrar Nuevo", "Editar Detalles", "Actualizar Stock"]
+        menu = ["Ver Inventario", "Cotizador PDF", "Calculadora de Obra", "Dashboard Gerencial", "Registrar Nuevo", "Editar Detalles", "Actualizar Stock", "Auto-Etiquetado IA"]
     else:
         menu = ["Ver Inventario", "Calculadora de Obra"]
 
@@ -610,6 +692,11 @@ def main():
                 st.success("✅ Stock actualizado correctamente")
                 time.sleep(0.5)
                 st.rerun()
+                
+    # --- 6. AUTO-ETIQUETADO IA ---
+    elif choice == "Auto-Etiquetado IA":
+        if not es_admin: st.stop()
+        generar_tags_ia(df, hoja)
 
 if __name__ == "__main__":
     main()
