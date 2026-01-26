@@ -28,7 +28,14 @@ st.markdown("""
 def conectar_google_sheets():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     try:
+        # 1. Cargamos el diccionario de secretos
         creds_dict = dict(st.secrets["gcp_service_account"])
+        
+        # 2. ARREGLO DEL ERROR PEM: Reemplazamos los saltos de línea escapados
+        # Esto arregla el error "InvalidHeader" si los \n se leyeron mal
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+
+        # 3. Creamos las credenciales con el diccionario corregido
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         return client.open("inventario_db").sheet1
