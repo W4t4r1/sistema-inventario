@@ -99,7 +99,7 @@ def generar_tags_ia(df, hoja):
             # Configurar Gemini
             try:
                 genai.configure(api_key=st.secrets["gemini"]["api_key"])
-                model = genai.GenerativeModel('gemini-1.5-flash') # Modelo rápido y eficiente
+                model = genai.GenerativeModel('gemini-1.5-flash-001') # Modelo rápido y eficiente
             except Exception as e:
                 st.error(f"Error configurando Gemini: {e}")
                 return
@@ -692,7 +692,7 @@ def main():
                 st.success("✅ Stock actualizado correctamente")
                 time.sleep(0.5)
                 st.rerun()
-                
+
     # --- 6. AUTO-ETIQUETADO IA ---
     elif choice == "Auto-Etiquetado IA":
         if not es_admin: st.stop()
