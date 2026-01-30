@@ -347,117 +347,116 @@ def generar_tags_ia(df, hoja):
 
 def consultor_ia(df):
     st.header("🤖 Consultor de Ventas IA")
-    st.info("Describe qué busca el cliente. Ej: 'Piso rústico para patio exterior' o 'Porcelanato blanco brillante'.")
+    
+    # 1. VERIFICACIÓN DE SEGURIDAD
+    try:
+        import google.generativeai as genai
+        st.caption(f"🔧 Sistema v{genai.__version__}") # Debe decir 0.8.6
+    except:
+        st.error("Librería dañada.")
+        return
 
-    # 1. VERIFICACIÓN DE DATOS
     if 'tags_ia' not in df.columns:
-        st.error("⚠️ ERROR: No hay columna 'tags_ia'. Ejecuta el Auto-Etiquetado primero.")
+        st.error("⚠️ Faltan datos (tags_ia).")
         return
 
-    # Verificar que haya datos reales
-    productos_con_tags = df[df['tags_ia'].astype(str).str.len() > 3]
-    if productos_con_tags.empty:
-        st.warning("⚠️ La base de datos de etiquetas está vacía. Ve a 'Auto-Etiquetado IA' y procesa al menos 1 lote.")
-        return
-
-    # 2. LISTA DE CANDIDATOS (ORDEN DE PRIORIDAD)
-    # Buscamos modelos estables para texto (no experimentales de limite 20)
+    # 2. LISTA DE MODELOS (Basada EXCLUSIVAMENTE en tu lista disponible)
     candidatos = [
-        "models/gemini-1.5-flash",       # El estándar actual (rápido)
-        "models/gemini-1.5-pro",         # El cerebro grande
-        "models/gemini-pro",             # El clásico (1.0) muy estable
-        "models/gemini-1.0-pro",         # Alias directo del clásico
-        "models/gemini-pro-latest"       # Alias dinámico (está en tu lista)
+        'models/gemini-2.0-flash-lite',  # El más moderno y ligero (Prioridad 1)
+        'models/gemini-flash-latest',    # El comodín (Prioridad 2)
+        'models/gemini-pro'              # El viejo confiable (Prioridad 3)
     ]
 
-    modelo_funcional = None
     genai.configure(api_key=st.secrets["gemini"]["api_key"])
 
-    # Preparamos el contexto (Max 300 productos)
-    inventario_util = productos_con_tags[['id', 'nombre', 'tags_ia']].to_dict(orient='records')
-    if len(inventario_util) > 300:
-        inventario_util = inventario_util[:300]
-    inventario_txt = json.dumps(inventario_util, ensure_ascii=False)
+    # 3. CONTEXTO
+    # Filtramos productos válidos
+    items = df[df['tags_ia'].astype(str).str.len() > 3]
+    # Tomamos 80 productos para no saturar ningún modelo
+    inv = items[['id', 'nombre', 'tags_ia']].head(80).to_dict(orient='records')
+    inv_json = json.dumps(inv, ensure_ascii=False)
 
-    query = st.chat_input("Escribe el requerimiento...")
+    query = st.chat_input("¿Qué busca el cliente?")
     
     if query:
         with st.chat_message("user"): st.write(query)
         
         with st.chat_message("assistant"):
-            status = st.status("🧠 Buscando neurona disponible...", expanded=True)
+            status = st.status("🧠 Buscando conexión estable...", expanded=True)
+            exito = False
             
-            # --- BUCLE DE INTENTOS (LA RULETA) ---
-            respuesta_obtenida = None
-            
-            for nombre_modelo in candidatos:
+            # --- BUCLE DE INTENTOS ---
+            for modelo_nombre in candidatos:
                 try:
-                    status.write(f"Intentando con: {nombre_modelo}...")
-                    model = genai.GenerativeModel(nombre_modelo)
+                    status.write(f"Intentando con: {modelo_nombre}...")
+                    
+                    # Configuración sin parámetros raros, solo el modelo
+                    model = genai.GenerativeModel(modelo_nombre)
                     
                     prompt = f"""
-                    Actúa como experto en pisos. INVENTARIO JSON: {inventario_txt}.
-                    BUSQUEDA: "{query}".
-                    Responde SOLO JSON válido:
+                    Eres un vendedor. Recomienda 3 productos para: "{query}".
+                    INVENTARIO: {inv_json}
+                    
+                    IMPORTANTE: Responde SOLO con este JSON exacto (sin ```json):
                     {{
-                        "recomendaciones": [{{ "id": "ID_EXACTO", "razon": "Breve motivo" }}],
+                        "recomendaciones": [
+                            {{ "id": "ID_EXACTO", "razon": "Motivo" }}
+                        ],
                         "consejo": "Tip breve"
                     }}
                     """
                     
-                    # Si esto falla, saltará al except y probará el siguiente modelo
-                    res = model.generate_content(prompt)
-                    respuesta_obtenida = res
-                    modelo_funcional = nombre_modelo
-                    break # ¡Éxito! Salimos del bucle
+                    response = model.generate_content(prompt)
                     
-                except Exception as e:
-                    # Si es error 404 (no existe) o 429 (cuota), seguimos probando
-                    print(f"Fallo {nombre_modelo}: {e}")
-                    continue 
-
-            # --- PROCESAMIENTO DEL RESULTADO ---
-            if respuesta_obtenida:
-                status.update(label=f"✅ ¡Conectado con {modelo_funcional}!", state="complete", expanded=False)
-                
-                try:
-                    texto_limpio = respuesta_obtenida.text.replace("```json", "").replace("```", "").strip()
-                    # Limpieza extra de JSON
-                    idx_inicio = texto_limpio.find("{")
-                    idx_fin = texto_limpio.rfind("}") + 1
-                    if idx_inicio != -1 and idx_fin != -1:
-                        texto_limpio = texto_limpio[idx_inicio:idx_fin]
-
-                    data = json.loads(texto_limpio)
+                    # Si llegamos aquí, ¡FUNCIONÓ!
+                    # Limpieza manual del texto (por si la IA habla de más)
+                    texto = response.text.replace("```json", "").replace("```", "").strip()
+                    if "{" in texto:
+                        texto = texto[texto.find("{"):texto.rfind("}")+1]
                     
+                    data = json.loads(texto)
+                    
+                    # ÉXITO ROTUNDO
+                    exito = True
+                    status.update(label=f"✅ Conectado con {modelo_nombre}", state="complete", expanded=False)
+                    
+                    # MOSTRAR RESULTADOS
                     recs = data.get('recomendaciones', [])
                     if not recs:
-                        st.warning("El modelo analizó pero no encontró coincidencias exactas.")
+                        st.warning("No encontré coincidencias exactas.")
                     else:
-                        st.subheader("🏆 Resultados Sugeridos:")
+                        st.subheader("🏆 Recomendaciones:")
                         cols = st.columns(3)
-                        for i, rec in enumerate(recs):
-                            id_buscado = str(rec['id']).strip()
-                            prod = df[df['id'].astype(str).str.strip() == id_buscado]
+                        for i, r in enumerate(recs):
+                            # Limpiar ID
+                            id_str = str(r['id']).strip()
+                            # Buscar en DF
+                            prod = df[df['id'].astype(str).str.strip() == id_str]
                             
-                            with cols[i % 3]:
+                            with cols[i%3]:
                                 if not prod.empty:
                                     row = prod.iloc[0]
                                     if str(row['imagen']).startswith("http"):
                                         st.image(row['imagen'])
                                     st.markdown(f"**{row['nombre']}**")
-                                    st.caption(f"💡 {rec['razon']}")
+                                    st.caption(r['razon'])
                                 else:
-                                    st.error(f"ID {id_buscado} fantasma.")
+                                    # Fallo parcial (ID no encontrado)
+                                    st.warning(f"Producto {id_str} sugerido pero no hallado.")
                         
-                        if 'consejo' in data:
-                            st.info(f"💡 **Tip:** {data['consejo']}")
-
+                        if 'consejo' in data: st.info(f"💡 {data['consejo']}")
+                    
+                    break # Salimos del bucle porque ya funcionó
+                    
                 except Exception as e:
-                    st.error("Error leyendo el JSON de la IA. Intenta de nuevo.")
-            else:
-                status.update(label="💀 Muerte Súbita", state="error")
-                st.error("❌ Todos los modelos fallaron. Tu API Key está exhausta por hoy o bloqueada. Intenta mañana o crea una nueva Key.")
+                    # Si falla, imprimimos el error pequeño y probamos el siguiente
+                    st.caption(f"❌ {modelo_nombre} falló: {str(e)[:100]}...")
+                    continue
+            
+            if not exito:
+                status.update(label="💀 Error Fatal", state="error")
+                st.error("No se pudo conectar con ningún modelo de tu lista.")
+                st.error("Posible causa: Tu cuenta nueva también agotó la cuota gratuita del modelo 'Flash'.")
 
 # --- 7. LOGIN ---
 def sidebar_login():
