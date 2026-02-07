@@ -413,9 +413,9 @@ def sidebar_login():
 # --- 8. EJECUCIÓN PRINCIPAL ---
 def main():
     es_admin = sidebar_login()
-    st.title("🏭 Sistema Inventario Ledisa v2.5")
+    st.title("🏭 Sistema Inventario Ledisa v3.0")
     
-    # Menú (Sin auto-etiquetado)
+    # Menú
     opciones = ["Ver Inventario", "Calculadora de Obra"]
     if es_admin:
         opciones += ["Cotizador PDF", "Dashboard", "Registrar Nuevo", "Editar Completo", "Actualizar Stock", "Consultor IA"]
@@ -424,7 +424,7 @@ def main():
     df, hoja = obtener_datos()
 
     # ---------------------------------------------------------
-    # 1. VER INVENTARIO (CON DESPLIEGUE DE M2)
+    # 1. VER INVENTARIO
     # ---------------------------------------------------------
     if menu == "Ver Inventario":
         busqueda = st.text_input("🔍 Buscar:", placeholder="Nombre, código o marca...")
@@ -441,20 +441,18 @@ def main():
                     if str(row['imagen']).startswith("http"): st.image(row['imagen'])
                     st.markdown(f"**{row['nombre']}**")
                     
-                    # DATOS CLAVE
                     st.markdown(f"🆔 `{row['id']}` | 🏷️ {row['marca']}")
                     
                     c1, c2 = st.columns(2)
-                    c1.metric("Stock Cajas", row['stock'])
+                    c1.metric("Stock", row['stock']) # Mostramos solo número genérico
                     c2.metric("Precio", f"S/. {row['precio']}")
                     
-                    # CÁLCULO M2 VISIBLE
+                    # LÓGICA VISUAL INTELIGENTE
                     if row['m2_caja'] > 0:
-                        st.markdown(f"📦 **{row['m2_caja']} m²/caja**")
-                        # Destacamos el total disponible
-                        st.success(f"📐 Total: **{row['total_m2']:.2f} m²**")
-                    else:
-                        st.text("Unidad (Sin m²)")
+                        st.caption(f"📦 {row['m2_caja']} m²/caja | Total: {row['total_m2']:.2f} m²")
+                    elif str(row['formato']) not in ["", "0", "-"]:
+                        # Si no tiene m2, mostramos lo que haya en formato (ej: 25kg, 1kg)
+                        st.caption(f"📦 Presentación: {row['formato']}")
                         
                     st.divider()
         else:
@@ -476,46 +474,71 @@ def main():
     elif menu == "Cotizador PDF": cotizador_logica(df)
     
     # ---------------------------------------------------------
-    # 5. CONSULTOR IA (FIXED)
+    # 5. CONSULTOR IA
     # ---------------------------------------------------------
     elif menu == "Consultor IA": consultor_ia(df)
     
     # ---------------------------------------------------------
-    # 6. REGISTRAR NUEVO (CON CÓDIGO SAP MANUAL)
+    # 6. REGISTRAR NUEVO (DINÁMICO)
     # ---------------------------------------------------------
     elif menu == "Registrar Nuevo":
-        st.subheader("📝 Ingreso de Mercadería")
+        st.subheader("📝 Ingreso de Mercadería Inteligente")
+        
+        # CATEGORÍA PRIMERO (Define el resto del formulario)
+        categorias_posibles = [
+            "Mayólica", "Porcelanato", "Piso", "Pared", # Grupo 1: M2
+            "Pegamento", "Fragua",                      # Grupo 2: Peso
+            "Sanitario", "Grifería", "Otro"             # Grupo 3: Unidad
+        ]
+        cat = st.selectbox("1. Selecciona la Categoría:", categorias_posibles)
+        
         with st.form("new_prod"):
-            # FILA 1: ID y Marca
+            # CAMPOS COMUNES
             c1, c2 = st.columns(2)
-            id_zap = c1.text_input("Código SAP / ID *", help="Ingresa el código manual")
+            id_zap = c1.text_input("Código SAP / ID *")
             marca = c2.selectbox("Marca", ["Celima", "Trebol", "Generico", "Otro"])
             
-            # FILA 2: Nombre y Categoría
+            nombre = st.text_input("Descripción del Producto *")
+            
+            # --- CAMPOS DINÁMICOS SEGÚN CATEGORÍA ---
             c3, c4 = st.columns(2)
-            nombre = c3.text_input("Descripción del Producto *")
-            cat = c4.selectbox("Categoría", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"])
             
-            # FILA 3: Formato y M2
+            # Valores por defecto (para que no fallen si se ocultan)
+            fmt_valor = "-" 
+            m2_valor = 0.0
+            calidad_valor = "Estándar"
+
+            # GRUPO 1: REVESTIMIENTOS (Necesitan m2 y formato)
+            if cat in ["Mayólica", "Porcelanato", "Piso", "Pared"]:
+                fmt_valor = c3.text_input("Formato (Ej: 60x60, 45x45)")
+                m2_valor = c4.number_input("Rendimiento (m² por caja) *", min_value=0.01, step=0.01)
+                calidad_valor = st.selectbox("Calidad", ["Comercial", "Extra", "Única", "Estándar"])
+            
+            # GRUPO 2: POLVOS (Necesitan Peso, NO m2)
+            elif cat in ["Pegamento", "Fragua"]:
+                # Reutilizamos la columna 'formato' para guardar el peso
+                fmt_valor = c3.text_input("Peso / Presentación (Ej: 25kg, 1kg)")
+                st.caption("ℹ️ El campo m² se guardará como 0 automáticamente.")
+                # m2_valor se queda en 0.0
+            
+            # GRUPO 3: PIEZAS (Sanitarios, etc)
+            else:
+                fmt_valor = c3.text_input("Color / Modelo (Opcional)")
+                # m2_valor se queda en 0.0
+
+            # CAMPOS FINALES COMUNES
             c5, c6 = st.columns(2)
-            fmt = c5.text_input("Formato (Ej: 60x60)")
-            m2 = c6.number_input("Rendimiento (m² por caja)", 0.0, step=0.01)
+            stk = c5.number_input("Stock Inicial (Cajas/Bolsas/Unid)", min_value=0, step=1)
+            prc = c6.number_input("Precio Unitario (S/.)", 0.0, step=0.1)
             
-            # FILA 4: Calidad y Stock
-            c7, c8 = st.columns(2)
-            calidad = c7.selectbox("Calidad", ["Comercial", "Extra", "Única", "Estándar"])
-            stk = c8.number_input("Stock Inicial (Cajas/Unid)", min_value=0, step=1)
-            
-            # FILA 5: Precio y Foto
-            c9, c10 = st.columns(2)
-            prc = c9.number_input("Precio Unitario", 0.0, step=0.1)
-            img = c10.file_uploader("Foto del Producto")
+            img = st.file_uploader("Foto del Producto")
             
             if st.form_submit_button("Guardar Producto"):
                 if not id_zap or not nombre:
-                    st.error("Falta ID o Nombre.")
+                    st.error("❌ Falta ID o Descripción.")
+                elif cat in ["Mayólica", "Porcelanato", "Piso", "Pared"] and m2_valor == 0:
+                    st.error("❌ Para pisos/paredes el rendimiento (m²) es obligatorio.")
                 else:
-                    # Verificar duplicados
                     if id_zap in df['id'].astype(str).values:
                         st.error(f"Error: El código {id_zap} ya existe.")
                     else:
@@ -524,93 +547,87 @@ def main():
                             with st.spinner("Subiendo foto..."):
                                 url = subir_a_imgbb(img.getvalue(), nombre)
                         
-                        # Orden Columnas: ID, Nombre, Categoria, Marca, Formato, M2, Calidad, Stock, Precio, Imagen
-                        # Asegúrate que tu Excel tenga estas columnas en este orden
-                        row = [id_zap, nombre, cat, marca, fmt, m2, calidad, stk, prc, url]
+                        # Guardamos todo en las mismas columnas del Excel
+                        # (Reutilizamos 'formato' para peso/color y 'm2' como 0 si no aplica)
+                        row = [id_zap, nombre, cat, marca, fmt_valor, m2_valor, calidad_valor, stk, prc, url]
                         hoja.append_row(row)
-                        st.success(f"✅ Registrado: {nombre}")
+                        st.success(f"✅ {cat} registrado correctamente")
                         time.sleep(1)
                         st.rerun()
 
     # ---------------------------------------------------------
-    # 7. EDITAR COMPLETO (RESTAURADO)
+    # 7. EDITAR COMPLETO
     # ---------------------------------------------------------
     elif menu == "Editar Completo":
-        st.subheader("✏️ Edición Total de Producto")
-        
-        item_sel = st.selectbox("Selecciona Producto a Editar:", df['id'] + " | " + df['nombre'])
+        st.subheader("✏️ Edición Total")
+        item_sel = st.selectbox("Producto:", df['id'] + " | " + df['nombre'])
         if item_sel:
             id_sel = item_sel.split(" | ")[0]
-            # Localizar fila
             idx = df[df['id'].astype(str) == id_sel].index[0]
             row = df.iloc[idx]
-            fila_sheet = idx + 2 # +1 por header, +1 por index 0
+            fila_sheet = idx + 2
             
             with st.form("edit_full"):
-                st.info(f"Editando: {row['nombre']}")
-                
                 # Campos editables
                 c1, c2 = st.columns(2)
                 n_nombre = c1.text_input("Nombre", value=row['nombre'])
                 n_marca = c2.text_input("Marca", value=row['marca'])
                 
                 c3, c4 = st.columns(2)
-                n_cat = c3.selectbox("Categoría", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Sanitario"], index=0) # Simplificado index
-                n_fmt = c4.text_input("Formato", value=row['formato'])
+                # Al editar, permitimos cambiar categoría, pero cuidado con los m2
+                n_cat = c3.selectbox("Categoría", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"], index=["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"].index(row['categoria']) if row['categoria'] in ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"] else 0)
+                
+                # Etiqueta dinámica para el campo formato
+                label_fmt = "Formato/Peso/Color"
+                n_fmt = c4.text_input(label_fmt, value=row['formato'])
                 
                 c5, c6 = st.columns(2)
-                n_m2 = c5.number_input("m²/caja", value=float(row['m2_caja']), step=0.01)
+                n_m2 = c5.number_input("m²/caja (Poner 0 si es Fragua/Pegamento)", value=float(row['m2_caja']), step=0.01)
                 n_precio = c6.number_input("Precio", value=float(row['precio']), step=0.1)
                 
-                c7, c8 = st.columns(2)
-                # Calidad
-                n_cal = c7.text_input("Calidad", value=row['calidad'])
-                # Foto
-                n_foto = c8.file_uploader("Cambiar Foto (Opcional)")
+                n_foto = st.file_uploader("Cambiar Foto")
 
                 if st.form_submit_button("💾 Guardar Cambios"):
-                    # URL Imagen
                     url_fin = row['imagen']
                     if n_foto:
                         url_fin = subir_a_imgbb(n_foto.getvalue(), n_nombre)
                     
-                    # Actualizar celda por celda o rango (Orden A-J)
-                    # ID no se cambia (Col 1)
-                    # Col 2: Nombre
                     hoja.update_cell(fila_sheet, 2, n_nombre)
                     hoja.update_cell(fila_sheet, 3, n_cat)
                     hoja.update_cell(fila_sheet, 4, n_marca)
                     hoja.update_cell(fila_sheet, 5, n_fmt)
                     hoja.update_cell(fila_sheet, 6, n_m2)
-                    hoja.update_cell(fila_sheet, 7, n_cal)
-                    # Stock (Col 8) lo dejamos quieto aquí, se usa Actualizar Stock
                     hoja.update_cell(fila_sheet, 9, n_precio)
                     hoja.update_cell(fila_sheet, 10, url_fin)
-                    
-                    st.success("Producto actualizado correctamente.")
+                    st.success("Actualizado")
                     time.sleep(1)
                     st.rerun()
 
     # ---------------------------------------------------------
-    # 8. ACTUALIZAR STOCK (RÁPIDO)
+    # 8. ACTUALIZAR STOCK
     # ---------------------------------------------------------
     elif menu == "Actualizar Stock":
-        st.subheader("📦 Ajuste Rápido de Inventario")
+        st.subheader("📦 Ajuste de Stock")
         item_sel = st.selectbox("Producto:", df['id'] + " | " + df['nombre'])
         id_sel = item_sel.split(" | ")[0]
         row = df[df['id'].astype(str) == id_sel].iloc[0]
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Stock Actual", f"{row['stock']} Cajas")
-        c2.metric("m² Totales", f"{row['total_m2']:.2f} m²")
+        # Mostramos métricas inteligentes según el tipo
+        c1, c2 = st.columns(2)
+        c1.metric("Stock Actual", f"{row['stock']}")
         
-        ajuste = c3.number_input("Sumar/Restar Cajas:", step=1, value=0)
+        if row['m2_caja'] > 0:
+            c2.metric("Disponibilidad Real", f"{row['total_m2']:.2f} m²")
+        else:
+            c2.caption(f"Unidad de medida: {row['formato']}")
         
-        if st.button("Aplicar Ajuste"):
+        ajuste = st.number_input("Sumar/Restar:", step=1, value=0)
+        
+        if st.button("Aplicar"):
             idx = df[df['id'].astype(str) == id_sel].index[0]
             fila_sheet = idx + 2
             nuevo_stock = int(row['stock']) + ajuste
-            hoja.update_cell(fila_sheet, 8, nuevo_stock) # Col 8 es Stock
+            hoja.update_cell(fila_sheet, 8, nuevo_stock)
             st.success(f"Nuevo stock: {nuevo_stock}")
             time.sleep(0.5)
             st.rerun()
