@@ -3,724 +3,519 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import requests
-import io
 import math
 import time
 import plotly.express as px
 from fpdf import FPDF
 import base64
 import google.generativeai as genai
-from PIL import Image
+from PIL import Image, ImageEnhance
+import io
 import json
 
-# --- 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS ---
-st.set_page_config(page_title="Inventario Ledisa v2", layout="wide", page_icon="🏗️")
+# --- 1. CONFIGURACIÓN DE PÁGINA ---
+st.set_page_config(page_title="Sistema Ledisa v3.5", layout="wide", page_icon="🏗️")
 
+# Estilos CSS Limpios
 st.markdown("""
     <style>
-        div[data-testid="column"] img {
-            height: 200px !important;
-            object-fit: cover !important;
-            border-radius: 8px;
-            width: 100%;
-        }
-        .stButton>button {
-            width: 100%;
-        }
-        .metric-box {
-            padding: 10px;
-            background-color: #f0f2f6;
-            border-radius: 5px;
-            text-align: center;
-            margin-bottom: 10px;
-        }
+        .stButton>button { width: 100%; border-radius: 5px; }
+        .metric-box { padding: 10px; background-color: #f0f2f6; border-radius: 5px; text-align: center; }
+        /* Ajuste para que las imágenes no se vean gigantes en móviles */
+        img { max-height: 300px; object-fit: contain; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- 2. CONEXIÓN A GOOGLE SHEETS (ROBUSTA) ---
+# --- 2. CONEXIÓN Y DATOS ---
 def conectar_google_sheets():
+    """Conexión robusta a Google Sheets con manejo de errores."""
     try:
-        scope = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        scope = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         
         if "gcp_service_account" not in st.secrets:
-            st.error("❌ No encuentro 'gcp_service_account' en secrets.toml")
+            st.error("❌ Error Crítico: No se detectaron las credenciales en secrets.toml")
             st.stop()
-            
+        
         secrets_dict = dict(st.secrets["gcp_service_account"])
         secrets_dict["private_key"] = secrets_dict["private_key"].replace("\\n", "\n")
-
+        
         creds = Credentials.from_service_account_info(secrets_dict, scopes=scope)
         client = gspread.authorize(creds)
         
-        try:
-            return client.open("Inventario").sheet1
-        except:
-            return client.open("inventario_db").sheet1
-
+        # Intenta abrir la hoja 'Inventario', si falla prueba con la default
+        try: return client.open("Inventario").sheet1
+        except: return client.open("inventario_db").sheet1
+            
     except Exception as e:
-        st.error(f"❌ Error de conexión: {e}")
+        st.error(f"❌ Error conectando a Google: {e}")
         st.stop()
 
+@st.cache_data(ttl=60) # Caché de 1 minuto para velocidad
 def obtener_datos():
     hoja = conectar_google_sheets()
-    if hoja:
-        try:
-            datos = hoja.get_all_values()
-            if not datos: return pd.DataFrame(), hoja
-            headers = datos.pop(0)
-            df = pd.DataFrame(datos, columns=headers)
-            
-            # --- LIMPIEZA Y CÁLCULOS AUTOMÁTICOS ---
-            # Aseguramos que los números sean números para poder multiplicar
-            df['stock'] = pd.to_numeric(df['stock'], errors='coerce').fillna(0).astype(int)
-            
-            # Limpieza de m2_caja (cambiar comas por puntos si las hay)
-            if 'm2_caja' in df.columns:
-                df['m2_caja'] = df['m2_caja'].astype(str).str.replace(',', '.')
-                df['m2_caja'] = pd.to_numeric(df['m2_caja'], errors='coerce').fillna(0.0)
-            else:
-                df['m2_caja'] = 0.0
-
-            # CALCULO DE METRAJE TOTAL (Stock * m2/caja)
-            df['total_m2'] = df['stock'] * df['m2_caja']
-            
-            return df, hoja
-        except Exception as e:
-            st.error(f"Error procesando datos: {e}")
-            return pd.DataFrame(), hoja
-    return pd.DataFrame(), None
-
-# --- 3. SERVICIOS EXTERNOS (IMGBB) ---
-def subir_a_imgbb(archivo_bytes, nombre):
+    if not hoja: return pd.DataFrame(), None
+    
     try:
+        datos = hoja.get_all_values()
+        if not datos: return pd.DataFrame(), hoja
+        
+        headers = datos.pop(0)
+        df = pd.DataFrame(datos, columns=headers)
+        
+        # Limpieza numérica vital para cálculos
+        cols_num = ['stock', 'm2_caja', 'precio']
+        for col in cols_num:
+            if col in df.columns:
+                # Elimina 'S/.', comas y espacios, convierte a float
+                df[col] = pd.to_numeric(
+                    df[col].astype(str).str.replace('S/.', '').str.replace(',', ''), 
+                    errors='coerce'
+                ).fillna(0)
+        
+        # Métrica Calculada: Total de metros disponibles
+        df['total_m2'] = df['stock'] * df['m2_caja']
+        
+        return df, hoja
+    except Exception as e:
+        st.error(f"Error procesando datos: {e}")
+        return pd.DataFrame(), hoja
+
+def subir_a_imgbb(archivo_bytes, nombre):
+    """Sube imagen a ImgBB y retorna URL pública."""
+    try:
+        if "imgbb" not in st.secrets: return None
         api_key = st.secrets["imgbb"]["key"]
         url = "https://api.imgbb.com/1/upload"
         payload = {"key": api_key, "name": nombre}
         files = {"image": archivo_bytes}
-        response = requests.post(url, data=payload, files=files)
-        if response.status_code == 200:
-            return response.json()['data']['url']
-        else:
-            return None
-    except Exception as e:
-        st.error(f"Error imagen: {e}")
-        return None
+        res = requests.post(url, data=payload, files=files)
+        if res.status_code == 200: return res.json()['data']['url']
+    except: pass
+    return None
 
-# --- 4. CLASE PDF ---
+# --- 3. TRUCO DE IMAGEN (MEJORA DE CALIDAD) ---
+def procesar_imagen_nitidez(url_imagen):
+    """
+    Descarga la imagen y aplica un filtro de nitidez digital
+    para compensar baja resolución.
+    """
+    if not url_imagen or not str(url_imagen).startswith("http"): return None
+    try:
+        response = requests.get(url_imagen, timeout=3)
+        img = Image.open(io.BytesIO(response.content))
+        
+        # Truco 1: Convertir a RGB (evita errores con PNG transparentes)
+        if img.mode != 'RGB': img = img.convert('RGB')
+        
+        # Truco 2: Aumentar Nitidez (Sharpness) un 50%
+        enhancer = ImageEnhance.Sharpness(img)
+        img = enhancer.enhance(1.5) 
+        
+        # Truco 3: Aumentar Contraste un 10%
+        enhancer_con = ImageEnhance.Contrast(img)
+        img = enhancer_con.enhance(1.1)
+        
+        return img
+    except:
+        return None # Si falla, no mostramos nada para no romper la app
+
+# --- 4. MÓDULOS DE LÓGICA DE NEGOCIO ---
+
 class PDF(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 16)
-        self.cell(0, 10, 'DISTRIBUIDORA DE ACABADOS LEDISA', 0, 1, 'C')
+        self.cell(0, 10, 'DISTRIBUIDORA LEDISA', 0, 1, 'C')
         self.set_font('Arial', 'I', 10)
-        self.cell(0, 5, 'Especialistas en Celima y Trebol', 0, 1, 'C')
+        self.cell(0, 5, 'Materiales de Construcción y Acabados', 0, 1, 'C')
         self.ln(10)
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font('Arial', 'I', 8)
-        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
-
-# --- 5. MÓDULOS DE LÓGICA ---
-
-def calculadora_logica(df):
-    st.subheader("🧮 Calculadora de Materiales PRO")
-    st.markdown("---")
+def calculadora_obra(df):
+    st.subheader("🧮 Calculadora de Materiales")
     
-    df_calc = df[df['categoria'].isin(['Mayólica', 'Porcelanato', 'Piso', 'Pared', 'Cerámico', 'Mayolica'])]
+    # Filtramos solo lo que se puede calcular por m2
+    df_rev = df[df['categoria'].isin(['Mayólica', 'Porcelanato', 'Piso', 'Pared', 'Cerámico'])]
     
-    if df_calc.empty:
-        st.warning("No hay productos de revestimiento registrados.")
-        return
-
     c1, c2 = st.columns([2, 1])
     with c1:
-        opciones = df_calc.apply(lambda x: f"{x['nombre']} ({x['formato']})", axis=1)
-        producto_str = st.selectbox("1. Selecciona el Piso/Pared:", opciones)
-        nombre_selec = producto_str.split(" (")[0]
+        opciones = df_rev.apply(lambda x: f"{x['nombre']} | {x['marca']}", axis=1)
+        sel = st.selectbox("Selecciona Producto:", opciones)
         
-        try:
-            item = df_calc[df_calc['nombre'] == nombre_selec].iloc[0]
-            rendimiento_caja = float(item['m2_caja'])
-        except:
-            rendimiento_caja = 0.0
+        if sel:
+            nombre_real = sel.split(" | ")[0]
+            item = df_rev[df_rev['nombre'] == nombre_real].iloc[0]
+            rendimiento = float(item['m2_caja'])
+            precio = float(item['precio'])
             
-        if rendimiento_caja == 0:
-            st.warning("⚠️ Producto sin rendimiento (m²) configurado.")
-        else:
-            st.caption(f"✅ Rendimiento: {rendimiento_caja} m²/caja")
+            st.info(f"📦 Rendimiento: **{rendimiento} m²/caja**")
+            st.success(f"💰 Precio: **S/. {precio:.2f}**")
+            
+            # Mostramos imagen optimizada
+            img_url = str(item['imagen']).split(",")[0]
+            img_obj = procesar_imagen_nitidez(img_url)
+            if img_obj: st.image(img_obj, width=200)
 
     with c2:
-        if str(item['imagen']).startswith("http"):
-            st.image(item['imagen'], width=150)
+        largo = st.number_input("Largo (m)", 0.0, step=0.1)
+        ancho = st.number_input("Ancho (m)", 0.0, step=0.1)
+        merma = st.selectbox("Merma (Cortes)", [0.05, 0.10, 0.15], index=1, format_func=lambda x: f"{int(x*100)}%")
 
-    st.markdown("### 2. Dimensiones y Precios")
-    col_largo, col_ancho, col_precio = st.columns(3)
-    largo = col_largo.number_input("Largo (m):", min_value=0.0, step=0.1)
-    ancho = col_ancho.number_input("Ancho (m):", min_value=0.0, step=0.1)
-    
-    precio_bd = float(item['precio']) if item.get('precio') else 0.0
-    precio_oferta = col_precio.number_input("Precio Unitario (S/.):", value=precio_bd, step=0.10)
-
-    st.markdown("### 3. Configuración")
-    c_merma, c_pegamento = st.columns(2)
-    merma = c_merma.selectbox("Merma:", [0.05, 0.10, 0.15], index=1, format_func=lambda x: f"{int(x*100)}%")
-    tipo_pegamento = c_pegamento.selectbox("Pegamento:", ["Estándar (Celima) - 25kg", "Trebol - 25kg"])
-    rend_pegamento = 3.0 if "Estándar" in tipo_pegamento else 2.5
-    
-    area_real = largo * ancho
-    if area_real > 0 and rendimiento_caja > 0:
+    if largo > 0 and ancho > 0 and rendimiento > 0:
+        area_real = largo * ancho
         area_total = area_real * (1 + merma)
-        cajas_necesarias = math.ceil(area_total / rendimiento_caja)
-        metros_totales = cajas_necesarias * rendimiento_caja
-        costo_total_cajas = cajas_necesarias * precio_oferta
-        bolsas_pegamento = math.ceil(area_total / rend_pegamento)
-
+        cajas = math.ceil(area_total / rendimiento)
+        total_pagar = cajas * precio
+        m2_comprados = cajas * rendimiento
+        
         st.divider()
-        st.success(f"📊 Requerimiento para {area_real:.2f} m² (+{int(merma*100)}% merma)")
-        
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("Cajas a Llevar", f"{cajas_necesarias} Cajas", f"{metros_totales:.2f} m² reales")
-        kpi2.metric("Precio Unit", f"S/. {precio_oferta:.2f}")
-        kpi3.metric("Total Piso", f"S/. {costo_total_cajas:,.2f}")
-        
-        st.info(f"🧱 Pegamento sugerido: **{bolsas_pegamento} bolsas**")
+        k1, k2 = st.columns(2)
+        k1.metric("Cajas Necesarias", f"{cajas} Cajas", f"Cubres {m2_comprados:.2f} m²")
+        k2.metric("Total a Pagar", f"S/. {total_pagar:,.2f}")
 
-def dashboard_logica(df):
-    st.subheader("📊 Tablero de Control Gerencial")
-    st.markdown("---")
+def dashboard_gerencial(df):
+    st.subheader("📊 Tablero de Control")
     if df.empty: return
-
-    # Limpieza de precio
-    def limpiar_precio(val):
-        if isinstance(val, str):
-            val = val.replace('S/.', '').replace(',', '').strip()
-        return float(val) if val else 0.0
-        
-    df['precio_num'] = df['precio'].apply(limpiar_precio)
-    df['valor_total'] = df['stock'] * df['precio_num']
     
-    # KPIs Generales
-    total_inventario_soles = df['valor_total'].sum()
-    total_cajas = df['stock'].sum()
-    total_m2_disponible = df['total_m2'].sum() # Nueva métrica solicitada
-
-    kpi1, kpi2, kpi3 = st.columns(3)
-    kpi1.metric("💰 Valor Inventario", f"S/. {total_inventario_soles:,.2f}")
-    kpi2.metric("📦 Total Cajas/Unid.", f"{int(total_cajas)}")
-    kpi3.metric("📐 Total Metros Cuadrados", f"{total_m2_disponible:,.2f} m²")
+    # KPIs
+    valor_total = (df['stock'] * df['precio']).sum()
+    stock_total = df['stock'].sum()
+    m2_totales = df['total_m2'].sum()
+    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Valor Inventario", f"S/. {valor_total:,.2f}")
+    c2.metric("Unidades Físicas", f"{int(stock_total)}")
+    c3.metric("Stock Superficie", f"{m2_totales:,.2f} m²")
     
     st.divider()
     
+    # Gráficos
+    g1, g2 = st.columns(2)
+    with g1:
+        st.markdown("**Stock por Categoría (Soles)**")
+        df['total_row'] = df['stock'] * df['precio']
+        df_cat = df.groupby('categoria')['total_row'].sum().reset_index()
+        fig = px.pie(df_cat, values='total_row', names='categoria', hole=0.4)
+        st.plotly_chart(fig, use_container_width=True)
+        
+    with g2:
+        st.markdown("**Top Productos con más m²**")
+        top_m2 = df.sort_values('total_m2', ascending=False).head(7)
+        st.bar_chart(top_m2.set_index('nombre')['total_m2'])
+
+def cotizador_pdf(df):
+    st.subheader("📄 Generador de Cotizaciones")
+    
+    if 'carrito' not in st.session_state: st.session_state.carrito = []
+    
+    # Selector
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        sel_prod = st.selectbox("Agregar Producto:", df['id'] + " - " + df['nombre'])
+    with c2:
+        cant = st.number_input("Cant.", min_value=1, value=1)
+        
+    if st.button("➕ Agregar"):
+        id_p = sel_prod.split(" - ")[0]
+        item = df[df['id'] == id_p].iloc[0]
+        subtotal = cant * float(item['precio'])
+        
+        st.session_state.carrito.append({
+            "desc": f"{item['nombre']} ({item['marca']})",
+            "cant": cant,
+            "unit": float(item['precio']),
+            "total": subtotal
+        })
+        
+    # Tabla
+    if st.session_state.carrito:
+        df_cart = pd.DataFrame(st.session_state.carrito)
+        st.dataframe(df_cart, hide_index=True)
+        gran_total = df_cart['total'].sum()
+        st.metric("Total Cotización", f"S/. {gran_total:,.2f}")
+        
+        cliente = st.text_input("Nombre Cliente:")
+        if st.button("🖨️ Descargar PDF") and cliente:
+            pdf = PDF()
+            pdf.add_page()
+            pdf.set_font("Arial", size=12)
+            pdf.cell(0, 10, f"Cliente: {cliente}", ln=True)
+            pdf.cell(0, 10, f"Fecha: {pd.Timestamp.now().strftime('%d/%m/%Y')}", ln=True)
+            pdf.ln(5)
+            # Tabla simple
+            pdf.set_font("Arial", 'B', 10)
+            pdf.cell(100, 10, "Producto", 1); pdf.cell(20, 10, "Cant", 1); pdf.cell(30, 10, "Precio", 1); pdf.ln()
+            pdf.set_font("Arial", size=10)
+            for p in st.session_state.carrito:
+                pdf.cell(100, 10, p['desc'][:50], 1)
+                pdf.cell(20, 10, str(p['cant']), 1)
+                pdf.cell(30, 10, f"{p['total']:.2f}", 1)
+                pdf.ln()
+            pdf.cell(150, 10, f"TOTAL: S/. {gran_total:.2f}", 1, 0, 'R')
+            
+            # Descarga
+            b64 = base64.b64encode(pdf.output(dest='S').encode('latin-1')).decode()
+            href = f'<a href="data:application/pdf;base64,{b64}" download="Cotizacion_{cliente}.pdf">📥 Bajar PDF</a>'
+            st.markdown(href, unsafe_allow_html=True)
+            
+        if st.button("Limpiar"):
+            st.session_state.carrito = []
+            st.rerun()
+
+def simulador_25d(df):
+    st.header("gfa Simulador de Espacios 2.5D")
+    st.info("Visualiza la combinación con efecto de profundidad.")
+    
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("##### 💵 Valor por Categoría")
-        df_cat = df.groupby('categoria')['valor_total'].sum().reset_index()
-        fig_cat = px.bar(df_cat, x='categoria', y='valor_total', color='valor_total', color_continuous_scale='Greens')
-        st.plotly_chart(fig_cat, use_container_width=True)
-    with c2:
-        st.markdown("##### 🏭 Stock (Cajas) por Marca")
-        df_marca = df.groupby('marca')['stock'].sum().reset_index()
-        fig_pie = px.pie(df_marca, values='stock', names='marca', hole=0.4)
-        st.plotly_chart(fig_pie, use_container_width=True)
-
-    # Tabla de productos con más m2
-    st.subheader("🏆 Top Productos con más Metraje Disponible")
-    top_m2 = df[['nombre', 'stock', 'm2_caja', 'total_m2']].sort_values(by='total_m2', ascending=False).head(10)
-    st.dataframe(top_m2, use_container_width=True)
-
-def cotizador_logica(df):
-    st.subheader("📄 Generador de Cotizaciones")
-    if 'carrito' not in st.session_state: st.session_state.carrito = []
-
-    col_sel, col_res = st.columns([1, 1])
-    with col_sel:
-        # Solo productos con stock
-        df_venta = df[df['stock'] > 0]
-        opciones = df_venta.apply(lambda x: f"{x['id']} | {x['nombre']}", axis=1)
-        producto_str = st.selectbox("Buscar Producto:", opciones, key="sel_prod_cot")
+        # Pared
+        df_p = df[df['categoria'].isin(['Pared', 'Mayólica', 'Cerámico'])]
+        if df_p.empty: df_p = df
+        sel_p = st.selectbox("🧱 Pared:", df_p['nombre'])
+        url_p = df_p[df_p['nombre'] == sel_p].iloc[0]['imagen'].split(",")[0]
         
-        if producto_str:
-            id_sel = producto_str.split(" | ")[0]
-            item = df[df['id'].astype(str) == id_sel].iloc[0]
-            
-            # Mostrar info rápida
-            st.info(f"Stock actual: {item['stock']} cajas ({item['total_m2']:.2f} m²)")
-            
-            c1, c2 = st.columns(2)
-            cantidad = c1.number_input("Cantidad (Cajas/Unid):", min_value=1, value=1)
-            precio_venta = c2.number_input("Precio Final (S/.):", value=float(item['precio'] or 0), min_value=0.0)
-            
-            if st.button("➕ Agregar a Cotización"):
-                # Calculamos m2 si aplica
-                m2_total_item = cantidad * item['m2_caja']
-                desc = f"{item['nombre']} ({item['marca']})"
-                if item['m2_caja'] > 0:
-                    desc += f" - [{m2_total_item:.2f} m²]"
+    with c2:
+        # Piso
+        df_s = df[df['categoria'].isin(['Piso', 'Porcelanato'])]
+        if df_s.empty: df_s = df
+        sel_s = st.selectbox("👣 Piso:", df_s['nombre'])
+        url_s = df_s[df_s['nombre'] == sel_s].iloc[0]['imagen'].split(",")[0]
 
-                linea = {
-                    "descripcion": desc,
-                    "cantidad": cantidad,
-                    "precio_unit": precio_venta,
-                    "subtotal": cantidad * precio_venta
-                }
-                st.session_state.carrito.append(linea)
-                st.success("Agregado")
+    st.markdown("---")
+    # Inyección HTML para el efecto 3D
+    html = f"""
+    <div style="display:flex; flex-direction:column; align-items:center; width:100%; max-width:600px; margin:auto; perspective:800px;">
+        <div style="width:100%; height:250px; background-image:url('{url_p}'); background-size:cover; background-position:center; box-shadow:0 10px 20px rgba(0,0,0,0.3); z-index:2;"></div>
+        <div style="width:100%; height:250px; background-image:url('{url_s}'); background-size:contain; background-repeat:repeat; transform:rotateX(60deg) scale(1.2); transform-origin:top; margin-top:-20px; z-index:1; opacity:0.9;"></div>
+    </div>
+    """
+    st.components.v1.html(html, height=550)
 
-    with col_res:
-        if len(st.session_state.carrito) > 0:
-            df_carrito = pd.DataFrame(st.session_state.carrito)
-            st.dataframe(df_carrito, hide_index=True)
-            total = df_carrito['subtotal'].sum()
-            st.metric("Total Cotización", f"S/. {total:,.2f}")
-            
-            if st.button("🗑️ Limpiar Carrito"):
-                st.session_state.carrito = []
-                st.rerun()
-            
-            cliente = st.text_input("Cliente:")
-            dni = st.text_input("DNI/RUC:")
-            
-            if st.button("🖨️ Generar PDF") and cliente:
-                pdf = PDF()
-                pdf.add_page()
-                pdf.set_font("Arial", size=12)
-                pdf.cell(0, 10, f"Cliente: {cliente} - {dni}", ln=True)
-                pdf.cell(0, 10, f"Fecha: {pd.Timestamp.now().strftime('%d/%m/%Y')}", ln=True)
-                pdf.ln(5)
-                pdf.set_font("Arial", 'B', 10)
-                pdf.cell(100, 10, "Descripcion", 1); pdf.cell(30, 10, "Cant", 1); pdf.cell(30, 10, "Total", 1); pdf.ln()
-                pdf.set_font("Arial", size=10)
-                for p in st.session_state.carrito:
-                    pdf.cell(100, 10, str(p['descripcion'])[:50], 1)
-                    pdf.cell(30, 10, str(p['cantidad']), 1)
-                    pdf.cell(30, 10, f"{p['subtotal']:.2f}", 1)
-                    pdf.ln()
-                pdf.cell(160, 10, f"TOTAL: S/. {total:.2f}", 1, 0, 'R')
-                
-                b64 = base64.b64encode(pdf.output(dest='S').encode('latin-1')).decode()
-                href = f'<a href="data:application/pdf;base64,{b64}" download="Cotizacion.pdf">📥 Descargar PDF</a>'
-                st.markdown(href, unsafe_allow_html=True)
-
-# --- 6. CONSULTOR IA (VERSIÓN FLASH LATEST) ---
-def consultor_ia(df):
-    st.header("🤖 Consultor de Ventas IA")
-    st.info("Buscando en tu inventario...")
+def consultor_ia_flash(df):
+    st.header("🤖 Consultor IA (Flash)")
+    st.info("Modelo: gemini-flash-latest")
     
-    # Verificación de datos
     if 'tags_ia' not in df.columns:
-        st.error("⚠️ Falta la columna 'tags_ia' en tu Excel.")
-        return
-
-    # Usamos SOLO el modelo que te funcionó
-    modelo_elegido = 'models/gemini-flash-latest'
-
+        st.warning("⚠️ Faltan etiquetas (tags_ia). La IA puede fallar.")
+    
+    # Configuración Modelo
     try:
         genai.configure(api_key=st.secrets["gemini"]["api_key"])
-        model = genai.GenerativeModel(modelo_elegido)
+        model = genai.GenerativeModel('models/gemini-flash-latest') # Tu modelo preferido
     except Exception as e:
-        st.error(f"Error configuración IA: {e}")
+        st.error(f"Error IA: {e}")
         return
 
-    # Contexto
-    items = df[df['tags_ia'].astype(str).str.len() > 3]
-    # Filtramos para no saturar, enviamos ID, Nombre, Tags y m2_caja para que la IA sepa el rendimiento
-    inv = items[['id', 'nombre', 'tags_ia', 'm2_caja']].head(100).to_dict(orient='records')
-    inv_json = json.dumps(inv, ensure_ascii=False)
-
-    query = st.chat_input("Escribe el requerimiento del cliente...")
-    
+    query = st.chat_input("¿Qué busca el cliente?")
     if query:
         with st.chat_message("user"): st.write(query)
-        
         with st.chat_message("assistant"):
-            status = st.status(f"🧠 Conectando con {modelo_elegido}...", expanded=True)
-            
-            prompt = f"""
-            Eres un vendedor experto de pisos. Recomienda 3 productos para: "{query}".
-            INVENTARIO: {inv_json}
-            
-            Responde SOLO JSON válido (sin markdown):
-            {{
-                "recomendaciones": [
-                    {{ "id": "ID_EXACTO", "razon": "Motivo breve" }}
-                ],
-                "consejo": "Tip breve"
-            }}
-            """
-            
-            try:
-                response = model.generate_content(prompt)
+            with st.spinner("Pensando..."):
+                # Contexto limitado para rapidez
+                inv_data = df[['id', 'nombre', 'tags_ia', 'precio']].head(80).to_dict(orient='records')
+                prompt = f"""
+                Recomienda 3 productos para: "{query}".
+                Inventario: {json.dumps(inv_data)}
+                Responde SOLO JSON válido:
+                {{ "recomendaciones": [ {{ "id": "ID", "razon": "txt" }} ], "consejo": "txt" }}
+                """
                 
-                # Limpieza de respuesta
-                texto = response.text.replace("```json", "").replace("```", "").strip()
-                if "{" in texto: texto = texto[texto.find("{"):texto.rfind("}")+1]
-                
-                data = json.loads(texto)
-                status.update(label="✅ Éxito", state="complete", expanded=False)
-                
-                recs = data.get('recomendaciones', [])
-                if not recs:
-                    st.warning("No encontré coincidencias.")
-                else:
-                    st.subheader("🏆 Recomendaciones:")
-                    cols = st.columns(3)
-                    for i, r in enumerate(recs):
-                        id_str = str(r['id']).strip()
-                        prod = df[df['id'].astype(str).str.strip() == id_str]
-                        with cols[i%3]:
-                            if not prod.empty:
-                                row = prod.iloc[0]
-                                if str(row['imagen']).startswith("http"):
-                                    st.image(row['imagen'])
-                                st.markdown(f"**{row['nombre']}**")
-                                st.caption(r['razon'])
-                                # Mostrar rendimiento también aquí
-                                if row['m2_caja'] > 0:
-                                    st.text(f"Rendimiento: {row['m2_caja']} m²/cj")
-                            else:
-                                st.error(f"ID {id_str} no encontrado.")
+                try:
+                    res = model.generate_content(prompt)
+                    clean_text = res.text.replace("```json", "").replace("```", "").strip()
+                    if "{" in clean_text: 
+                        clean_text = clean_text[clean_text.find("{"):clean_text.rfind("}")+1]
                     
+                    data = json.loads(clean_text)
+                    
+                    st.subheader("🏆 Sugerencias:")
+                    cols = st.columns(3)
+                    for i, r in enumerate(data.get('recomendaciones', [])):
+                        prod = df[df['id'].astype(str) == str(r['id'])].iloc[0] if not df[df['id'].astype(str) == str(r['id'])].empty else None
+                        
+                        with cols[i%3]:
+                            if prod is not None:
+                                img_url = str(prod['imagen']).split(",")[0]
+                                # Usamos la función de nitidez aquí
+                                img_obj = procesar_imagen_nitidez(img_url)
+                                if img_obj: st.image(img_obj)
+                                
+                                st.markdown(f"**{prod['nombre']}**")
+                                st.caption(f"_{r['razon']}_")
+                                st.markdown(f"**S/. {prod['precio']}**")
+                            else:
+                                st.error(f"ID {r['id']} no encontrado.")
+                                
                     if 'consejo' in data: st.info(f"💡 {data['consejo']}")
+                    
+                except Exception as e:
+                    st.error(f"La IA no pudo responder: {e}")
 
-            except Exception as e:
-                status.update(label="❌ Error", state="error")
-                st.error(f"Error: {e}")
-
-# --- 7. LOGIN ---
-def sidebar_login():
-    st.sidebar.title("🔐 Acceso")
-    if st.session_state.get('password_correct', False):
-        st.sidebar.success("ADMINISTRADOR")
-        if st.sidebar.button("Cerrar Sesión"):
-            st.session_state['password_correct'] = False
-            st.rerun()
-        return True
-    else:
-        st.sidebar.info("Modo: VISITANTE")
-        with st.sidebar.form("login"):
-            pwd = st.text_input("Contraseña", type="password")
-            if st.form_submit_button("Entrar"):
-                if pwd == st.secrets["general"]["password"]:
-                    st.session_state['password_correct'] = True
-                    st.rerun()
-                else:
-                    st.error("Incorrecto")
-        return False
-    
-    # --- MÓDULO: SIMULADOR VISUAL (NUEVO) ---
-def simulador_visual(df):
-    st.header("🎨 Simulador de Ambientes: Piso + Pared")
-    st.info("Combina productos para ver cómo quedan juntos.")
-
-    # 1. FILTRAR DATOS
-    # Asumimos que tienes una columna 'categoria' o usas tags para diferenciar
-    # Si no tienes tags perfectos, usamos búsqueda por nombre
-    
-    col_pared, col_piso = st.columns(2)
-    
-    with col_pared:
-        st.subheader("1. Elige la Pared 🧱")
-        # Filtramos posibles paredes (Mayólicas, Paredes, Fachaletas)
-        df_pared = df[df['categoria'].isin(['Pared', 'Mayólica', 'Cerámico', 'Decorado'])]
-        if df_pared.empty: df_pared = df # Fallback si no hay categorias exactas
-        
-        opciones_pared = df_pared.apply(lambda x: f"{x['nombre']} ({x['id']})", axis=1)
-        sel_pared = st.selectbox("Buscar Pared:", opciones_pared, key="sel_pared")
-        
-        # Obtener imagen pared
-        id_pared = sel_pared.split("(")[-1].replace(")", "")
-        item_pared = df[df['id'].astype(str) == id_pared].iloc[0]
-        img_pared_url = str(item_pared['imagen']).split(",")[0] # Tomamos la primera foto
-
-    with col_piso:
-        st.subheader("2. Elige el Piso 👣")
-        # Filtramos posibles pisos
-        df_piso = df[df['categoria'].isin(['Piso', 'Porcelanato', 'Cerámico'])]
-        if df_piso.empty: df_piso = df
-        
-        opciones_piso = df_piso.apply(lambda x: f"{x['nombre']} ({x['id']})", axis=1)
-        sel_piso = st.selectbox("Buscar Piso:", opciones_piso, key="sel_piso")
-        
-        # Obtener imagen piso
-        id_piso = sel_piso.split("(")[-1].replace(")", "")
-        item_piso = df[df['id'].astype(str) == id_piso].iloc[0]
-        img_piso_url = str(item_piso['imagen']).split(",")[0]
-
-    # 2. VISUALIZACIÓN "EN COLUMNA" (El Truco Visual)
-    st.markdown("---")
-    st.subheader("👀 Resultado Visual")
-    
-    # Usamos contenedores para controlar el ancho y que parezca una habitación
-    c_sim, c_info = st.columns([1, 1])
-    
-    with c_sim:
-        # Mostramos PARED ARRIBA
-        if img_pared_url.startswith("http"):
-            st.image(img_pared_url, use_column_width=True, caption="Pared")
-        else:
-            st.warning("Pared sin imagen")
-            
-        # Mostramos PISO ABAJO (Sin espacio entre ellos para dar efecto de continuidad)
-        if img_piso_url.startswith("http"):
-            st.image(img_piso_url, use_column_width=True, caption="Piso")
-        else:
-            st.warning("Piso sin imagen")
-
-    with c_info:
-        st.success("✅ Combinación Seleccionada")
-        st.markdown(f"**Pared:** {item_pared['nombre']}")
-        st.markdown(f"**Piso:** {item_piso['nombre']}")
-        
-        total_precio = float(item_pared['precio']) + float(item_piso['precio'])
-        st.metric("Precio m² (Promedio Combinado)", f"S/. {total_precio/2:.2f}")
-        
-        if st.button("🛒 Agregar Ambos a Cotización"):
-            # Lógica simple para agregar al carrito (si usas la función de cotizador)
-            if 'carrito' not in st.session_state: st.session_state.carrito = []
-            
-            # Agregar Pared
-            st.session_state.carrito.append({
-                "descripcion": f"[PARED] {item_pared['nombre']}",
-                "cantidad": 1,
-                "precio_unit": float(item_pared['precio']),
-                "subtotal": float(item_pared['precio'])
-            })
-            # Agregar Piso
-            st.session_state.carrito.append({
-                "descripcion": f"[PISO] {item_piso['nombre']}",
-                "cantidad": 1,
-                "precio_unit": float(item_piso['precio']),
-                "subtotal": float(item_piso['precio'])
-            })
-            st.toast("¡Agregados al carrito!", icon="🎉")
-
-# --- 8. EJECUCIÓN PRINCIPAL ---
+# --- 5. INTERFAZ PRINCIPAL Y MENÚS ---
 def main():
-    es_admin = sidebar_login()
-    st.title("🏭 Sistema Inventario Ledisa v3.0")
+    # Login simple
+    if 'auth' not in st.session_state: st.session_state.auth = False
     
-    # Menú
-    opciones = ["Ver Inventario", "Calculadora de Obra"]
-    if es_admin:
-        opciones += ["Simulador Visual","Cotizador PDF", "Dashboard", "Registrar Nuevo", "Editar Completo", "Actualizar Stock", "Consultor IA"]
-    
-    menu = st.sidebar.radio("Navegación:", opciones)
-    df, hoja = obtener_datos()
+    with st.sidebar:
+        st.title("🔐 Acceso")
+        if not st.session_state.auth:
+            pwd = st.text_input("Contraseña", type="password")
+            if st.button("Entrar"):
+                if pwd == st.secrets["general"]["password"]:
+                    st.session_state.auth = True
+                    st.rerun()
+                else: st.error("Incorrecto")
+            return # Detener ejecución si no está logueado
+            
+        if st.button("Cerrar Sesión"):
+            st.session_state.auth = False
+            st.rerun()
 
-    # ---------------------------------------------------------
-    # 1. VER INVENTARIO
-    # ---------------------------------------------------------
+    # App Principal
+    st.title("🏭 Sistema Ledisa v3.5")
+    df, hoja = obtener_datos()
+    
+    menu = st.sidebar.radio("Menú:", 
+        ["Ver Inventario", "Registrar Nuevo", "Editar Producto", "Actualizar Stock", 
+         "Calculadora Obra", "Cotizador PDF", "Simulador 2.5D", "Dashboard", "Consultor IA"])
+
+    # 1. VER INVENTARIO (Con Doble Foto y Nitidez)
     if menu == "Ver Inventario":
-        busqueda = st.text_input("🔍 Buscar:", placeholder="Nombre, código o marca...")
-        
-        if not df.empty and busqueda:
-            df = df[df.astype(str).apply(lambda x: x.str.contains(busqueda, case=False)).any(axis=1)]
+        q = st.text_input("🔍 Buscar Producto:")
+        if q and not df.empty:
+            df = df[df.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
         
         if not df.empty:
-            st.caption(f"Mostrando {len(df)} productos.")
             cols = st.columns(3)
             for i, row in df.iterrows():
-                with cols[i % 3]:
+                with cols[i%3]:
                     st.container()
-                    if str(row['imagen']).startswith("http"): st.image(row['imagen'])
-                    st.markdown(f"**{row['nombre']}**")
+                    # Gestión de fotos
+                    imgs = str(row['imagen']).split(",")
+                    url_p = imgs[0] if len(imgs)>0 and imgs[0].startswith("http") else None
+                    url_a = imgs[1] if len(imgs)>1 and imgs[1].startswith("http") else None
                     
-                    st.markdown(f"🆔 `{row['id']}` | 🏷️ {row['marca']}")
+                    # Pestañas si hay 2 fotos
+                    if url_p and url_a:
+                        t1, t2 = st.tabs(["Pieza", "Ambiente"])
+                        with t1: 
+                            im = procesar_imagen_nitidez(url_p)
+                            if im: st.image(im)
+                        with t2: 
+                            im = procesar_imagen_nitidez(url_a)
+                            if im: st.image(im)
+                    elif url_p:
+                        im = procesar_imagen_nitidez(url_p)
+                        if im: st.image(im)
+                    else:
+                        st.text("Sin imagen")
+                        
+                    st.markdown(f"**{row['nombre']}**")
+                    st.caption(f"ID: {row['id']} | {row['marca']}")
                     
                     c1, c2 = st.columns(2)
-                    c1.metric("Stock", row['stock']) # Mostramos solo número genérico
+                    c1.metric("Stock", row['stock'])
                     c2.metric("Precio", f"S/. {row['precio']}")
                     
-                    # LÓGICA VISUAL INTELIGENTE
                     if row['m2_caja'] > 0:
-                        st.caption(f"📦 {row['m2_caja']} m²/caja | Total: {row['total_m2']:.2f} m²")
+                        st.success(f"📦 Total: {row['total_m2']:.2f} m²")
                     elif str(row['formato']) not in ["", "0", "-"]:
-                        # Si no tiene m2, mostramos lo que haya en formato (ej: 25kg, 1kg)
-                        st.caption(f"📦 Presentación: {row['formato']}")
+                        st.info(f"⚖️ {row['formato']}")
                         
                     st.divider()
-        else:
-            st.warning("No hay productos.")
 
-    # ---------------------------------------------------------
-    # 2. CALCULADORA
-    # ---------------------------------------------------------
-    elif menu == "Calculadora de Obra": calculadora_logica(df)
-    
-    # ---------------------------------------------------------
-    # 3. DASHBOARD
-    # ---------------------------------------------------------
-    elif menu == "Dashboard": dashboard_logica(df)
-    
-    # ---------------------------------------------------------
-    # 4. COTIZADOR
-    # ---------------------------------------------------------
-    elif menu == "Cotizador PDF": cotizador_logica(df)
-    
-    # ---------------------------------------------------------
-    # 5. CONSULTOR IA
-    # ---------------------------------------------------------
-    elif menu == "Consultor IA": consultor_ia(df)
-    
-    elif menu == "Simulador Visual":
-        simulador_visual(df)
-
-    # ---------------------------------------------------------
-    # 6. REGISTRAR NUEVO (DINÁMICO)
-    # ---------------------------------------------------------
+    # 2. REGISTRAR (Lógica Dinámica)
     elif menu == "Registrar Nuevo":
-        st.subheader("📝 Ingreso de Mercadería Inteligente")
+        st.subheader("📝 Nuevo Ingreso")
+        cat = st.selectbox("Categoría Principal:", 
+            ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"])
         
-        # CATEGORÍA PRIMERO (Define el resto del formulario)
-        categorias_posibles = [
-            "Mayólica", "Porcelanato", "Piso", "Pared", # Grupo 1: M2
-            "Pegamento", "Fragua",                      # Grupo 2: Peso
-            "Sanitario", "Grifería", "Otro"             # Grupo 3: Unidad
-        ]
-        cat = st.selectbox("1. Selecciona la Categoría:", categorias_posibles)
-        
-        with st.form("new_prod"):
-            # CAMPOS COMUNES
+        with st.form("reg"):
             c1, c2 = st.columns(2)
-            id_zap = c1.text_input("Código SAP / ID *")
-            marca = c2.selectbox("Marca", ["Celima", "Trebol", "Generico", "Otro"])
+            id_z = c1.text_input("Código/ID *")
+            nom = c2.text_input("Nombre *")
+            marca = st.selectbox("Marca", ["Celima", "Trebol", "Generico", "Otro"])
             
-            nombre = st.text_input("Descripción del Producto *")
-            
-            # --- CAMPOS DINÁMICOS SEGÚN CATEGORÍA ---
+            # Dinamismo
+            fmt_val, m2_val = "-", 0.0
             c3, c4 = st.columns(2)
             
-            # Valores por defecto (para que no fallen si se ocultan)
-            fmt_valor = "-" 
-            m2_valor = 0.0
-            calidad_valor = "Estándar"
-
-            # GRUPO 1: REVESTIMIENTOS (Necesitan m2 y formato)
             if cat in ["Mayólica", "Porcelanato", "Piso", "Pared"]:
-                fmt_valor = c3.text_input("Formato (Ej: 60x60, 45x45)")
-                m2_valor = c4.number_input("Rendimiento (m² por caja) *", min_value=0.01, step=0.01)
-                calidad_valor = st.selectbox("Calidad", ["Comercial", "Extra", "Única", "Estándar"])
-            
-            # GRUPO 2: POLVOS (Necesitan Peso, NO m2)
+                fmt_val = c3.text_input("Formato (cm)")
+                m2_val = c4.number_input("m² por Caja *", min_value=0.01)
             elif cat in ["Pegamento", "Fragua"]:
-                # Reutilizamos la columna 'formato' para guardar el peso
-                fmt_valor = c3.text_input("Peso / Presentación (Ej: 25kg, 1kg)")
-                st.caption("ℹ️ El campo m² se guardará como 0 automáticamente.")
-                # m2_valor se queda en 0.0
-            
-            # GRUPO 3: PIEZAS (Sanitarios, etc)
+                fmt_val = c3.text_input("Peso/Presentación")
+                st.caption("ℹ️ m² se guardará como 0")
             else:
-                fmt_valor = c3.text_input("Color / Modelo (Opcional)")
-                # m2_valor se queda en 0.0
-
-            # CAMPOS FINALES COMUNES
+                fmt_val = c3.text_input("Modelo/Color")
+            
             c5, c6 = st.columns(2)
-            stk = c5.number_input("Stock Inicial (Cajas/Bolsas/Unid)", min_value=0, step=1)
-            prc = c6.number_input("Precio Unitario (S/.)", 0.0, step=0.1)
+            stk = c5.number_input("Stock Inicial", min_value=0)
+            prc = c6.number_input("Precio S/.", min_value=0.0)
             
-            img = st.file_uploader("Foto del Producto")
+            f1 = st.file_uploader("Foto Pieza")
+            f2 = st.file_uploader("Foto Ambiente (Opcional)")
             
-            if st.form_submit_button("Guardar Producto"):
-                if not id_zap or not nombre:
-                    st.error("❌ Falta ID o Descripción.")
-                elif cat in ["Mayólica", "Porcelanato", "Piso", "Pared"] and m2_valor == 0:
-                    st.error("❌ Para pisos/paredes el rendimiento (m²) es obligatorio.")
+            if st.form_submit_button("Guardar"):
+                if not id_z or not nom: st.error("Faltan datos")
+                elif cat in ["Piso", "Pared"] and m2_val == 0: st.error("Falta m²")
                 else:
-                    if id_zap in df['id'].astype(str).values:
-                        st.error(f"Error: El código {id_zap} ya existe.")
-                    else:
-                        url = ""
-                        if img: 
-                            with st.spinner("Subiendo foto..."):
-                                url = subir_a_imgbb(img.getvalue(), nombre)
-                        
-                        # Guardamos todo en las mismas columnas del Excel
-                        # (Reutilizamos 'formato' para peso/color y 'm2' como 0 si no aplica)
-                        row = [id_zap, nombre, cat, marca, fmt_valor, m2_valor, calidad_valor, stk, prc, url]
-                        hoja.append_row(row)
-                        st.success(f"✅ {cat} registrado correctamente")
-                        time.sleep(1)
-                        st.rerun()
-
-    # ---------------------------------------------------------
-    # 7. EDITAR COMPLETO
-    # ---------------------------------------------------------
-    elif menu == "Editar Completo":
-        st.subheader("✏️ Edición Total")
-        item_sel = st.selectbox("Producto:", df['id'] + " | " + df['nombre'])
-        if item_sel:
-            id_sel = item_sel.split(" | ")[0]
-            idx = df[df['id'].astype(str) == id_sel].index[0]
-            row = df.iloc[idx]
-            fila_sheet = idx + 2
-            
-            with st.form("edit_full"):
-                # Campos editables
-                c1, c2 = st.columns(2)
-                n_nombre = c1.text_input("Nombre", value=row['nombre'])
-                n_marca = c2.text_input("Marca", value=row['marca'])
-                
-                c3, c4 = st.columns(2)
-                # Al editar, permitimos cambiar categoría, pero cuidado con los m2
-                n_cat = c3.selectbox("Categoría", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"], index=["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"].index(row['categoria']) if row['categoria'] in ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario"] else 0)
-                
-                # Etiqueta dinámica para el campo formato
-                label_fmt = "Formato/Peso/Color"
-                n_fmt = c4.text_input(label_fmt, value=row['formato'])
-                
-                c5, c6 = st.columns(2)
-                n_m2 = c5.number_input("m²/caja (Poner 0 si es Fragua/Pegamento)", value=float(row['m2_caja']), step=0.01)
-                n_precio = c6.number_input("Precio", value=float(row['precio']), step=0.1)
-                
-                n_foto = st.file_uploader("Cambiar Foto")
-
-                if st.form_submit_button("💾 Guardar Cambios"):
-                    url_fin = row['imagen']
-                    if n_foto:
-                        url_fin = subir_a_imgbb(n_foto.getvalue(), n_nombre)
+                    u1 = subir_a_imgbb(f1.getvalue(), nom+"_1") if f1 else ""
+                    u2 = subir_a_imgbb(f2.getvalue(), nom+"_2") if f2 else ""
+                    # Unimos urls con coma
+                    u_final = f"{u1},{u2}" if u2 else u1
                     
-                    hoja.update_cell(fila_sheet, 2, n_nombre)
-                    hoja.update_cell(fila_sheet, 3, n_cat)
-                    hoja.update_cell(fila_sheet, 4, n_marca)
-                    hoja.update_cell(fila_sheet, 5, n_fmt)
-                    hoja.update_cell(fila_sheet, 6, n_m2)
-                    hoja.update_cell(fila_sheet, 9, n_precio)
-                    hoja.update_cell(fila_sheet, 10, url_fin)
-                    st.success("Actualizado")
+                    row = [id_z, nom, cat, marca, fmt_val, m2_val, "Estándar", stk, prc, u_final]
+                    hoja.append_row(row)
+                    st.success("Guardado!")
                     time.sleep(1)
                     st.rerun()
 
-    # ---------------------------------------------------------
-    # 8. ACTUALIZAR STOCK
-    # ---------------------------------------------------------
+    # 3. EDITAR
+    elif menu == "Editar Producto":
+        st.subheader("✏️ Editar Datos")
+        sel = st.selectbox("Producto:", df['id'] + " | " + df['nombre'])
+        if sel:
+            idx = df[df['id'] == sel.split(" | ")[0]].index[0]
+            row = df.iloc[idx]
+            
+            with st.form("edit"):
+                n_nom = st.text_input("Nombre", row['nombre'])
+                c1, c2 = st.columns(2)
+                n_cat = c1.text_input("Categoría", row['categoria'])
+                n_prc = c2.number_input("Precio", value=float(row['precio']))
+                n_m2 = st.number_input("m² Caja", value=float(row['m2_caja']))
+                
+                if st.form_submit_button("Actualizar"):
+                    fila = idx + 2
+                    hoja.update_cell(fila, 2, n_nom)
+                    hoja.update_cell(fila, 3, n_cat)
+                    hoja.update_cell(fila, 6, n_m2)
+                    hoja.update_cell(fila, 9, n_prc)
+                    st.success("Listo")
+                    st.rerun()
+
+    # 4. STOCK RÁPIDO
     elif menu == "Actualizar Stock":
-        st.subheader("📦 Ajuste de Stock")
-        item_sel = st.selectbox("Producto:", df['id'] + " | " + df['nombre'])
-        id_sel = item_sel.split(" | ")[0]
-        row = df[df['id'].astype(str) == id_sel].iloc[0]
+        st.subheader("📦 Ajuste de Inventario")
+        sel = st.selectbox("Producto:", df['id'] + " | " + df['nombre'])
+        row = df[df['id'] == sel.split(" | ")[0]].iloc[0]
         
-        # Mostramos métricas inteligentes según el tipo
-        c1, c2 = st.columns(2)
-        c1.metric("Stock Actual", f"{row['stock']}")
-        
-        if row['m2_caja'] > 0:
-            c2.metric("Disponibilidad Real", f"{row['total_m2']:.2f} m²")
-        else:
-            c2.caption(f"Unidad de medida: {row['formato']}")
-        
-        ajuste = st.number_input("Sumar/Restar:", step=1, value=0)
+        st.metric("Stock Actual", int(row['stock']))
+        ajuste = st.number_input("Sumar/Restar:", step=1)
         
         if st.button("Aplicar"):
-            idx = df[df['id'].astype(str) == id_sel].index[0]
-            fila_sheet = idx + 2
-            nuevo_stock = int(row['stock']) + ajuste
-            hoja.update_cell(fila_sheet, 8, nuevo_stock)
-            st.success(f"Nuevo stock: {nuevo_stock}")
-            time.sleep(0.5)
+            idx = df[df['id'] == sel.split(" | ")[0]].index[0]
+            nuevo = int(row['stock']) + ajuste
+            hoja.update_cell(idx+2, 8, nuevo)
+            st.success(f"Nuevo stock: {nuevo}")
+            time.sleep(1)
             st.rerun()
+
+    # Módulos Extra
+    elif menu == "Calculadora Obra": calculadora_obra(df)
+    elif menu == "Cotizador PDF": cotizador_pdf(df)
+    elif menu == "Dashboard": dashboard_gerencial(df)
+    elif menu == "Simulador 2.5D": simulador_25d(df)
+    elif menu == "Consultor IA": consultor_ia_flash(df)
 
 if __name__ == "__main__":
     main()
