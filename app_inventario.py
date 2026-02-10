@@ -409,6 +409,93 @@ def sidebar_login():
                 else:
                     st.error("Incorrecto")
         return False
+    
+    # --- MÓDULO: SIMULADOR VISUAL (NUEVO) ---
+def simulador_visual(df):
+    st.header("🎨 Simulador de Ambientes: Piso + Pared")
+    st.info("Combina productos para ver cómo quedan juntos.")
+
+    # 1. FILTRAR DATOS
+    # Asumimos que tienes una columna 'categoria' o usas tags para diferenciar
+    # Si no tienes tags perfectos, usamos búsqueda por nombre
+    
+    col_pared, col_piso = st.columns(2)
+    
+    with col_pared:
+        st.subheader("1. Elige la Pared 🧱")
+        # Filtramos posibles paredes (Mayólicas, Paredes, Fachaletas)
+        df_pared = df[df['categoria'].isin(['Pared', 'Mayólica', 'Cerámico', 'Decorado'])]
+        if df_pared.empty: df_pared = df # Fallback si no hay categorias exactas
+        
+        opciones_pared = df_pared.apply(lambda x: f"{x['nombre']} ({x['id']})", axis=1)
+        sel_pared = st.selectbox("Buscar Pared:", opciones_pared, key="sel_pared")
+        
+        # Obtener imagen pared
+        id_pared = sel_pared.split("(")[-1].replace(")", "")
+        item_pared = df[df['id'].astype(str) == id_pared].iloc[0]
+        img_pared_url = str(item_pared['imagen']).split(",")[0] # Tomamos la primera foto
+
+    with col_piso:
+        st.subheader("2. Elige el Piso 👣")
+        # Filtramos posibles pisos
+        df_piso = df[df['categoria'].isin(['Piso', 'Porcelanato', 'Cerámico'])]
+        if df_piso.empty: df_piso = df
+        
+        opciones_piso = df_piso.apply(lambda x: f"{x['nombre']} ({x['id']})", axis=1)
+        sel_piso = st.selectbox("Buscar Piso:", opciones_piso, key="sel_piso")
+        
+        # Obtener imagen piso
+        id_piso = sel_piso.split("(")[-1].replace(")", "")
+        item_piso = df[df['id'].astype(str) == id_piso].iloc[0]
+        img_piso_url = str(item_piso['imagen']).split(",")[0]
+
+    # 2. VISUALIZACIÓN "EN COLUMNA" (El Truco Visual)
+    st.markdown("---")
+    st.subheader("👀 Resultado Visual")
+    
+    # Usamos contenedores para controlar el ancho y que parezca una habitación
+    c_sim, c_info = st.columns([1, 1])
+    
+    with c_sim:
+        # Mostramos PARED ARRIBA
+        if img_pared_url.startswith("http"):
+            st.image(img_pared_url, use_column_width=True, caption="Pared")
+        else:
+            st.warning("Pared sin imagen")
+            
+        # Mostramos PISO ABAJO (Sin espacio entre ellos para dar efecto de continuidad)
+        if img_piso_url.startswith("http"):
+            st.image(img_piso_url, use_column_width=True, caption="Piso")
+        else:
+            st.warning("Piso sin imagen")
+
+    with c_info:
+        st.success("✅ Combinación Seleccionada")
+        st.markdown(f"**Pared:** {item_pared['nombre']}")
+        st.markdown(f"**Piso:** {item_piso['nombre']}")
+        
+        total_precio = float(item_pared['precio']) + float(item_piso['precio'])
+        st.metric("Precio m² (Promedio Combinado)", f"S/. {total_precio/2:.2f}")
+        
+        if st.button("🛒 Agregar Ambos a Cotización"):
+            # Lógica simple para agregar al carrito (si usas la función de cotizador)
+            if 'carrito' not in st.session_state: st.session_state.carrito = []
+            
+            # Agregar Pared
+            st.session_state.carrito.append({
+                "descripcion": f"[PARED] {item_pared['nombre']}",
+                "cantidad": 1,
+                "precio_unit": float(item_pared['precio']),
+                "subtotal": float(item_pared['precio'])
+            })
+            # Agregar Piso
+            st.session_state.carrito.append({
+                "descripcion": f"[PISO] {item_piso['nombre']}",
+                "cantidad": 1,
+                "precio_unit": float(item_piso['precio']),
+                "subtotal": float(item_piso['precio'])
+            })
+            st.toast("¡Agregados al carrito!", icon="🎉")
 
 # --- 8. EJECUCIÓN PRINCIPAL ---
 def main():
@@ -418,7 +505,7 @@ def main():
     # Menú
     opciones = ["Ver Inventario", "Calculadora de Obra"]
     if es_admin:
-        opciones += ["Cotizador PDF", "Dashboard", "Registrar Nuevo", "Editar Completo", "Actualizar Stock", "Consultor IA"]
+        opciones += ["Simulador Visual","Cotizador PDF", "Dashboard", "Registrar Nuevo", "Editar Completo", "Actualizar Stock", "Consultor IA"]
     
     menu = st.sidebar.radio("Navegación:", opciones)
     df, hoja = obtener_datos()
@@ -478,6 +565,9 @@ def main():
     # ---------------------------------------------------------
     elif menu == "Consultor IA": consultor_ia(df)
     
+    elif menu == "Simulador Visual":
+        simulador_visual(df)
+
     # ---------------------------------------------------------
     # 6. REGISTRAR NUEVO (DINÁMICO)
     # ---------------------------------------------------------
