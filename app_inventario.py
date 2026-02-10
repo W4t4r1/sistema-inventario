@@ -299,24 +299,42 @@ def main():
             df = df[df.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
         
         if not df.empty:
+            # --- REEMPLAZA DESDE AQUÍ ---
             cols = st.columns(3)
             for i, row in df.iterrows():
                 with cols[i%3]:
                     st.container()
-                    imgs = str(row['imagen']).split(",")
                     
-                    # Lógica de pestañas si hay 2 fotos
-                    if len(imgs) > 1 and imgs[1]:
-                        t1, t2 = st.tabs(["Pieza", "Ambiente"])
-                        with t1: 
-                            if imgs[0]: st.image(procesar_imagen_nitidez(imgs[0]) or imgs[0])
-                        with t2:
-                            if imgs[1]: st.image(procesar_imagen_nitidez(imgs[1]) or imgs[1])
-                    elif len(imgs) > 0 and imgs[0]:
-                        st.image(procesar_imagen_nitidez(imgs[0]) or imgs[0])
+                    # 1. Obtener URLs de imagen de forma segura
+                    imgs = str(row['imagen']).split(",") if row['imagen'] else []
+                    
+                    # Limpiamos URLs vacías que puedan quedar (ej: "url1,")
+                    imgs = [url.strip() for url in imgs if url and len(url.strip()) > 5]
+
+                    # 2. Lógica de visualización (BLINDADA)
+                    if len(imgs) > 0:
+                        # Si hay al menos una imagen válida
+                        url_p = imgs[0]
+                        url_a = imgs[1] if len(imgs) > 1 else None
+
+                        if url_p and url_a:
+                            # CASO 1: Dos fotos (Pestañas)
+                            t1, t2 = st.tabs(["Pieza", "Ambiente"])
+                            with t1: 
+                                im = procesar_imagen_nitidez(url_p)
+                                st.image(im or url_p) # Si falla el proceso, usa la URL
+                            with t2:
+                                im = procesar_imagen_nitidez(url_a)
+                                st.image(im or url_a)
+                        else:
+                            # CASO 2: Solo una foto
+                            im = procesar_imagen_nitidez(url_p)
+                            st.image(im or url_p)
                     else:
-                        st.markdown("*Sin imagen*")
+                        # CASO 3: No hay imagen (Evita el error 'None')
+                        st.info("🖼️ Sin imagen")
                         
+                    # 3. Datos del producto
                     st.markdown(f"**{row['nombre']}**")
                     st.caption(f"{row['id']} | {row['marca']}")
                     
@@ -328,7 +346,7 @@ def main():
                         st.success(f"📦 Total: {row['total_m2']:.2f} m²")
                     
                     st.divider()
-
+                    
     # 2. REGISTRAR (INSERTAR EN SUPABASE)
     elif menu == "Registrar Nuevo":
         st.subheader("📝 Nuevo Producto")
