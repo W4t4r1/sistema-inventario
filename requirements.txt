@@ -1,10 +1,8 @@
 streamlit
 pandas
-openpyxl
-Pillow
-gspread
-google-auth
+supabase
 requests
 plotly
 fpdf
 google-generativeai
+Pillow
