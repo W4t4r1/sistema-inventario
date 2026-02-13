@@ -400,27 +400,77 @@ def main():
                         time.sleep(1)
                         st.rerun()
 
-    # 3. EDITAR (UPDATE)
+# ---------------------------------------------------------
+    # 3. EDITAR PRODUCTO (AHORA CON GESTIÓN DE FOTOS)
+    # ---------------------------------------------------------
     elif menu == "Editar Producto":
-        st.subheader("✏️ Editar")
+        st.subheader("✏️ Editar Detalles y Fotos")
+        
+        # Selector de producto
         opciones = df.apply(lambda x: f"{x['id']} | {x['nombre']}", axis=1)
-        sel = st.selectbox("Buscar:", opciones)
+        sel = st.selectbox("Buscar producto a editar:", opciones)
         
         if sel:
             id_sel = sel.split(" | ")[0]
-            # Recuperamos datos frescos de la BD para no editar sobre caché viejo
-            item = supabase.table("inventario").select("*").eq("id", id_sel).execute().data[0]
+            # 1. Recuperamos los datos frescos de Supabase
+            try:
+                data_list = supabase.table("inventario").select("*").eq("id", id_sel).execute().data
+                if not data_list:
+                    st.error("Error recuperando producto.")
+                    st.stop()
+                item = data_list[0]
+            except Exception as e:
+                st.error(f"Error de conexión: {e}")
+                st.stop()
             
-            with st.form("edit"):
-                n_nom = st.text_input("Nombre", item['nombre'])
-                n_prc = st.number_input("Precio", value=float(item['precio']))
-                n_m2 = st.number_input("m² Caja", value=float(item['m2_caja']))
+            # Formulario de Edición
+            with st.form("edit_form"):
+                c1, c2 = st.columns(2)
+                n_nom = c1.text_input("Nombre", item['nombre'])
+                n_cat = c2.selectbox("Categoría", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"], index=["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"].index(item['categoria']) if item['categoria'] in ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"] else 0)
                 
-                if st.form_submit_button("Actualizar"):
+                c3, c4 = st.columns(2)
+                n_prc = c3.number_input("Precio (S/.)", value=float(item['precio']))
+                n_m2 = c4.number_input("m² por Caja", value=float(item['m2_caja']))
+                
+                st.markdown("---")
+                st.markdown("### 📸 Actualizar Imágenes")
+                st.info("Sube fotos nuevas SOLO si quieres reemplazar las actuales.")
+                
+                col_f1, col_f2 = st.columns(2)
+                new_f1 = col_f1.file_uploader("Nueva Foto Pieza (Técnica)", type=["jpg", "png", "jpeg"])
+                new_f2 = col_f2.file_uploader("Nueva Foto Ambiente (Inspiración)", type=["jpg", "png", "jpeg"])
+
+                if st.form_submit_button("💾 Guardar Cambios Completos"):
+                    # Lógica de Actualización de Imágenes
+                    urls_actuales = str(item['imagen']).split(",") if item['imagen'] else []
+                    url_final_1 = urls_actuales[0] if len(urls_actuales) > 0 else ""
+                    url_final_2 = urls_actuales[1] if len(urls_actuales) > 1 else ""
+
+                    # Si subió foto nueva 1, la reemplazamos
+                    if new_f1:
+                        st.caption("Subiendo foto pieza...")
+                        url_final_1 = subir_a_supabase(new_f1.getvalue(), f"{id_sel}_pieza", new_f1.type)
+                    
+                    # Si subió foto nueva 2, la reemplazamos
+                    if new_f2:
+                        st.caption("Subiendo foto ambiente...")
+                        url_final_2 = subir_a_supabase(new_f2.getvalue(), f"{id_sel}_amb", new_f2.type)
+                    
+                    # Reconstruimos la cadena de imágenes
+                    imgs_db = f"{url_final_1},{url_final_2}" if url_final_2 else url_final_1
+                    
+                    # Actualizamos en Supabase
                     supabase.table("inventario").update({
-                        "nombre": n_nom, "precio": n_prc, "m2_caja": n_m2
+                        "nombre": n_nom,
+                        "categoria": n_cat,
+                        "precio": n_prc, 
+                        "m2_caja": n_m2,
+                        "imagen": imgs_db
                     }).eq("id", id_sel).execute()
-                    st.success("Actualizado")
+                    
+                    st.success("✅ Producto actualizado correctamente")
+                    time.sleep(1.5)
                     st.rerun()
 
     # 4. ACTUALIZAR STOCK
