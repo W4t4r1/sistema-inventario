@@ -271,6 +271,12 @@ def main():
     if 'auth' not in st.session_state: st.session_state.auth = False
     
     with st.sidebar:
+        try:
+            st.image("logo_ledisa.png", use_container_width=True)
+        except:
+            st.title("🏭 LEDISA")
+        st.markdown("---")
+
         st.title("🔐 Acceso")
         if not st.session_state.auth:
             pwd = st.text_input("Contraseña", type="password")
