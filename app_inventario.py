@@ -298,49 +298,79 @@ def main():
         ["Ver Inventario", "Registrar Nuevo", "Editar Producto", "Actualizar Stock", 
          "Calculadora Obra", "Simulador 2.5D", "Dashboard", "Consultor IA"])
 
-    # 1. VER INVENTARIO
+    # 1. VER INVENTARIO (NIVEL E-COMMERCE)
     if menu == "Ver Inventario":
-        q = st.text_input("🔍 Buscar:")
-        if q and not df.empty:
-            df = df[df.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
+        st.subheader("🛒 Catálogo de Productos")
         
-        if not df.empty:
-            # --- REEMPLAZA DESDE AQUÍ ---
+        # --- SECCIÓN DE FILTROS ---
+        with st.expander("🔎 Filtros Avanzados", expanded=True):
+            f1, f2, f3 = st.columns(3)
+            
+            # Extraer valores únicos dinámicamente de la base de datos
+            categorias_disp = sorted([c for c in df['categoria'].unique() if str(c).strip()])
+            marcas_disp = sorted([m for m in df['marca'].unique() if str(m).strip()])
+            
+            # Calcular precios máximos y mínimos reales del inventario
+            min_p = float(df['precio'].min()) if not df.empty else 0.0
+            max_p = float(df['precio'].max()) if not df.empty else 1000.0
+            if min_p == max_p: max_p = min_p + 1.0 # Evitar error si todo cuesta igual
+            
+            # Widgets visuales
+            sel_cat = f1.multiselect("Categoría", categorias_disp, placeholder="Todas las categorías")
+            sel_mar = f2.multiselect("Marca", marcas_disp, placeholder="Todas las marcas")
+            rango_precio = f3.slider("Rango de Precio (S/.)", min_value=min_p, max_value=max_p, value=(min_p, max_p))
+            
+            # Buscador tradicional como respaldo
+            q = st.text_input("Búsqueda rápida (Nombre o Código):", placeholder="Ej. Gris, Nápoles...")
+
+        # --- MOTOR DE FILTRADO PANDAS (LÓGICA VECTORIZADA) ---
+        df_filtrado = df.copy()
+        
+        if sel_cat:
+            df_filtrado = df_filtrado[df_filtrado['categoria'].isin(sel_cat)]
+        if sel_mar:
+            df_filtrado = df_filtrado[df_filtrado['marca'].isin(sel_mar)]
+            
+        df_filtrado = df_filtrado[
+            (df_filtrado['precio'] >= rango_precio[0]) & 
+            (df_filtrado['precio'] <= rango_precio[1])
+        ]
+        
+        if q:
+            df_filtrado = df_filtrado[df_filtrado.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
+
+        # --- RENDERIZADO DE RESULTADOS ---
+        st.markdown(f"**Mostrando {len(df_filtrado)} productos encontrados**")
+        st.markdown("---")
+        
+        if not df_filtrado.empty:
             cols = st.columns(3)
-            for i, row in df.iterrows():
+            for i, row in df_filtrado.iterrows():
                 with cols[i%3]:
                     st.container()
                     
-                    # 1. Obtener URLs de imagen de forma segura
+                    # Lógica de imágenes blindada
                     imgs = str(row['imagen']).split(",") if row['imagen'] else []
-                    
-                    # Limpiamos URLs vacías que puedan quedar (ej: "url1,")
                     imgs = [url.strip() for url in imgs if url and len(url.strip()) > 5]
 
-                    # 2. Lógica de visualización (BLINDADA)
                     if len(imgs) > 0:
-                        # Si hay al menos una imagen válida
                         url_p = imgs[0]
                         url_a = imgs[1] if len(imgs) > 1 else None
 
                         if url_p and url_a:
-                            # CASO 1: Dos fotos (Pestañas)
                             t1, t2 = st.tabs(["Pieza", "Ambiente"])
                             with t1: 
                                 im = procesar_imagen_nitidez(url_p)
-                                st.image(im or url_p) # Si falla el proceso, usa la URL
+                                st.image(im or url_p)
                             with t2:
                                 im = procesar_imagen_nitidez(url_a)
                                 st.image(im or url_a)
                         else:
-                            # CASO 2: Solo una foto
                             im = procesar_imagen_nitidez(url_p)
                             st.image(im or url_p)
                     else:
-                        # CASO 3: No hay imagen (Evita el error 'None')
                         st.info("🖼️ Sin imagen")
                         
-                    # 3. Datos del producto
                     st.markdown(f"**{row['nombre']}**")
                     st.caption(f"{row['id']} | {row['marca']}")
                     
@@ -352,7 +382,9 @@ def main():
                         st.success(f"📦 Total: {row['total_m2']:.2f} m²")
                     
                     st.divider()
-                    
+        else:
+            st.warning("⚠️ No se encontraron productos con estos filtros. Prueba ampliando el rango de precio o quitando categorías.")
+            
     # 2. REGISTRAR (INSERTAR EN SUPABASE)
     elif menu == "Registrar Nuevo":
         st.subheader("📝 Nuevo Producto")
