@@ -1,542 +1,297 @@
 import streamlit as st
 import pandas as pd
 from supabase import create_client, Client
-import requests
-import math
-import time
-import plotly.express as px
-from fpdf import FPDF
-import base64
-import google.generativeai as genai
-from PIL import Image, ImageEnhance
-import io
-import json
-from datetime import datetime
 
-# --- 1. CONFIGURACIÓN DE PÁGINA ---
-st.set_page_config(page_title="Sistema Ledisa PRO", layout="wide", page_icon="🏗️")
+# --- 1. CONFIGURACIÓN INICIAL Y CONEXIÓN ---
+st.set_page_config(page_title="LEDISA - Sistema Interno", page_icon="📦", layout="wide")
 
-st.markdown("""
-    <style>
-        .stButton>button { width: 100%; border-radius: 5px; font-weight: bold; }
-        .metric-box { padding: 15px; background-color: #f8f9fa; border-radius: 8px; text-align: center; border: 1px solid #dee2e6; }
-        img { max-height: 350px; object-fit: contain; border-radius: 8px; }
-        /* Ajuste sutil para tablas */
-        [data-testid="stDataFrame"] { border: 1px solid #f0f0f0; border-radius: 5px; }
-    </style>
-""", unsafe_allow_html=True)
-
-# --- 2. CONEXIÓN SUPABASE (EL NUEVO CEREBRO) ---
+# Instanciamos el cliente de forma encapsulada
 @st.cache_resource
-def init_supabase():
-    """Inicializa la conexión única a Supabase."""
-    try:
-        url = st.secrets["supabase"]["url"]
-        key = st.secrets["supabase"]["key"]
-        return create_client(url, key)
-    except Exception as e:
-        st.error(f"❌ Error crítico de conexión: {e}")
-        st.stop()
+def get_supabase() -> Client:
+    # Ahora le indicamos que entre primero a la sección "supabase"
+    url = st.secrets["supabase"]["SUPABASE_URL"]
+    key = st.secrets["supabase"]["SUPABASE_KEY"]
+    return create_client(url, key)
 
-supabase = init_supabase()
+try:
+    supabase = get_supabase()
+except Exception as e:
+    st.error("❌ Error de credenciales. Revisa tu archivo secrets.toml")
+    st.stop()
 
-def obtener_datos():
-    """Descarga la tabla 'inventario' en milisegundos."""
-    try:
-        response = supabase.table("inventario").select("*").execute()
-        df = pd.DataFrame(response.data)
-        
-        if df.empty: return pd.DataFrame(), None
+def procesar_imagen_nitidez(url):
+    return url.strip() if url else None
 
-        # Asegurar tipos numéricos (Postgres ya lo hace, pero por seguridad)
-        cols_num = ['stock', 'm2_caja', 'precio']
-        for col in cols_num:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        
-        # Métrica Calculada
-        df['total_m2'] = df['stock'] * df['m2_caja']
-        return df
-    except Exception as e:
-        st.error(f"Error leyendo base de datos: {e}")
-        return pd.DataFrame()
+# OPTIMIZACIÓN CLAVE: Apagamos el spinner automático (show_spinner=False)
+# Esto evita el error "Cursor is not set" al arrancar el servidor
+@st.cache_data(ttl=60, show_spinner=False)
+def cargar_inventario():
+    # Usamos la conexión directamente dentro de la función
+    cliente = get_supabase()
+    respuesta = cliente.table('inventario').select('*').execute()
+    df = pd.DataFrame(respuesta.data)
+    if 'color' not in df.columns:
+        df['color'] = None
+    return df
 
-def subir_a_supabase(archivo_bytes, nombre_archivo, tipo_mime):
-    """Sube imagen al Bucket 'productos' de Supabase."""
-    try:
-        # Generar nombre único: nombre_fecha.jpg
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        nombre_limpio = "".join(x for x in nombre_archivo if x.isalnum())
-        path = f"{nombre_limpio}_{timestamp}.jpg"
-        
-        # Subir
-        bucket = "productos"
-        supabase.storage.from_(bucket).upload(
-            path=path,
-            file=archivo_bytes,
-            file_options={"content-type": tipo_mime}
-        )
-        
-        # Obtener URL Pública
-        public_url = supabase.storage.from_(bucket).get_public_url(path)
-        return public_url
-    except Exception as e:
-        st.error(f"Error subiendo a Storage: {e}")
-        return None
+def limpiar_cache():
+    st.cache_data.clear()
 
-# --- 3. UTILIDADES DE IMAGEN (MEJORA VISUAL) ---
-def procesar_imagen_nitidez(url_imagen):
-    """Mejora visual para pantallas."""
-    if not url_imagen or not str(url_imagen).startswith("http"): return None
-    try:
-        response = requests.get(url_imagen, timeout=3)
-        img = Image.open(io.BytesIO(response.content))
-        if img.mode != 'RGB': img = img.convert('RGB')
-        
-        # Mejora sutil
-        enhancer = ImageEnhance.Sharpness(img)
-        img = enhancer.enhance(1.4) # 40% más nítido
-        return img
-    except: return None
+# --- 2. INTERFAZ DE USUARIO Y MENÚ ---
+st.sidebar.image("https://via.placeholder.com/150x50.png?text=LEDISA", use_container_width=True) # Reemplaza con tu logo si tienes
+st.sidebar.title("Menú:")
+menu = st.sidebar.radio("", [
+    "Ver Inventario", 
+    "Registrar Nuevo", 
+    "Editar Producto", 
+    "Actualizar Stock", 
+    "Calculadora Obra", 
+    "Dashboard", 
+    "Consultor IA"
+])
 
-# --- 4. LÓGICA DE NEGOCIO ---
+df = cargar_inventario()
 
-class PDF(FPDF):
-    def header(self):
-        self.set_font('Arial', 'B', 16)
-        self.cell(0, 10, 'DISTRIBUIDORA LEDISA', 0, 1, 'C')
-        self.set_font('Arial', 'I', 10)
-        self.cell(0, 5, 'Materiales de Construcción y Acabados', 0, 1, 'C')
-        self.ln(10)
-
-def calculadora_obra(df):
-    st.subheader("🧮 Calculadora de Materiales PRO")
-    df_rev = df[df['categoria'].isin(['Mayólica', 'Porcelanato', 'Piso', 'Pared', 'Cerámico'])]
+# ==========================================
+# 1. VER INVENTARIO
+# ==========================================
+if menu == "Ver Inventario":
+    st.subheader("🛒 Catálogo de Productos")
     
-    if df_rev.empty:
-        st.warning("No hay revestimientos en la base de datos.")
-        return
-
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        # Búsqueda inteligente
-        opciones = df_rev.apply(lambda x: f"{x['nombre']} ({x['marca']})", axis=1)
-        sel = st.selectbox("Producto:", opciones)
+    with st.expander("🔎 Filtros Avanzados", expanded=True):
+        f1, f2, f3, f4 = st.columns(4)
         
-        if sel:
-            # Recuperamos el ID real buscando en el DF
-            idx = opciones[opciones == sel].index[0]
-            item = df_rev.loc[idx]
-            
-            rendimiento = float(item['m2_caja'])
-            precio = float(item['precio'])
-            
-            st.info(f"📦 Caja: **{rendimiento} m²** | Precio: **S/. {precio:.2f}**")
-            
-            # Mostrar imagen
-            imgs = str(item['imagen']).split(",")
-            if len(imgs) > 0 and imgs[0]:
-                im = procesar_imagen_nitidez(imgs[0])
-                if im: st.image(im, width=200)
-
-    with c2:
-        largo = st.number_input("Largo (m)", 0.0, step=0.1)
-        ancho = st.number_input("Ancho (m)", 0.0, step=0.1)
-        merma = st.selectbox("Merma", [0.05, 0.10, 0.15], index=1, format_func=lambda x: f"{int(x*100)}%")
-
-    if largo > 0 and ancho > 0 and rendimiento > 0:
-        area_real = largo * ancho
-        area_total = area_real * (1 + merma)
-        cajas = math.ceil(area_total / rendimiento)
-        total_pagar = cajas * precio
-        m2_cubiertos = cajas * rendimiento
+        categorias_disp = sorted(df['categoria'].dropna().astype(str).unique()) if not df.empty else []
+        marcas_disp = sorted(df['marca'].dropna().astype(str).unique()) if not df.empty else []
+        colores_disp = sorted(df['color'].dropna().astype(str).unique()) if not df.empty and 'color' in df.columns else []
         
-        st.success(f"✅ Necesitas **{cajas} cajas**")
-        st.write(f"Cubrirás {m2_cubiertos:.2f} m² (Sobra: {m2_cubiertos - area_total:.2f} m²)")
-        st.metric("Total a Pagar", f"S/. {total_pagar:,.2f}")
-
-def dashboard_gerencial(df):
-    st.subheader("📊 Tablero Gerencial")
-    if df.empty: return
-    
-    valor_total = (df['stock'] * df['precio']).sum()
-    stock_total = df['stock'].sum()
-    m2_totales = df['total_m2'].sum()
-    
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Valor Inventario", f"S/. {valor_total:,.2f}", delta_color="normal")
-    c2.metric("Unidades Físicas", f"{int(stock_total)}")
-    c3.metric("Stock Superficie", f"{m2_totales:,.2f} m²")
-    
-    st.divider()
-    
-    g1, g2 = st.columns(2)
-    with g1:
-        st.markdown("**💰 Valor por Marca**")
-        df['valor_row'] = df['stock'] * df['precio']
-        df_mar = df.groupby('marca')['valor_row'].sum().reset_index()
-        fig = px.pie(df_mar, values='valor_row', names='marca', hole=0.5)
-        st.plotly_chart(fig, use_container_width=True)
+        min_p = float(df['precio'].min()) if not df.empty else 0.0
+        max_p = float(df['precio'].max()) if not df.empty else 1000.0
+        if min_p == max_p: max_p = min_p + 1.0 
         
-    with g2:
-        st.markdown("**🏆 Top Productos (Stock m²)**")
-        top = df.sort_values('total_m2', ascending=False).head(8)
-        st.bar_chart(top.set_index('nombre')['total_m2'])
-
-def simulador_25d(df):
-    st.header("📐 Simulador de Espacios 2.5D")
-    
-    c1, c2 = st.columns(2)
-    with c1:
-        df_p = df[df['categoria'].isin(['Pared', 'Mayólica', 'Cerámico'])]
-        if df_p.empty: df_p = df
-        sel_p = st.selectbox("🧱 Pared:", df_p['nombre'])
-        try:
-            url_p = df_p[df_p['nombre'] == sel_p].iloc[0]['imagen'].split(",")[0]
-        except: url_p = ""
+        sel_cat = f1.multiselect("Categoría", categorias_disp)
+        sel_mar = f2.multiselect("Marca", marcas_disp)
+        sel_col = f3.multiselect("Color", colores_disp)
+        rango_precio = f4.slider("Precio (S/.)", min_value=min_p, max_value=max_p, value=(min_p, max_p))
         
-    with c2:
-        df_s = df[df['categoria'].isin(['Piso', 'Porcelanato'])]
-        if df_s.empty: df_s = df
-        sel_s = st.selectbox("👣 Piso:", df_s['nombre'])
-        try:
-            url_s = df_s[df_s['nombre'] == sel_s].iloc[0]['imagen'].split(",")[0]
-        except: url_s = ""
+        q = st.text_input("Búsqueda rápida (Nombre o Código):", placeholder="Ej. Gris, Varilla, Celima...")
 
-    st.markdown("---")
-    if url_p and url_s:
-        html = f"""
-        <div style="display:flex; flex-direction:column; align-items:center; width:100%; max-width:600px; margin:auto; perspective:800px;">
-            <div style="width:100%; height:250px; background-image:url('{url_p}'); background-size:cover; background-position:center; box-shadow:0 10px 20px rgba(0,0,0,0.3); z-index:2;"></div>
-            <div style="width:100%; height:250px; background-image:url('{url_s}'); background-size:contain; background-repeat:repeat; transform:rotateX(60deg) scale(1.2); transform-origin:top; margin-top:-20px; z-index:1; opacity:0.9;"></div>
-        </div>
-        """
-        st.components.v1.html(html, height=550)
+    if not df.empty:
+        mask = (df['precio'] >= rango_precio[0]) & (df['precio'] <= rango_precio[1])
+        if sel_cat: mask &= df['categoria'].isin(sel_cat)
+        if sel_mar: mask &= df['marca'].isin(sel_mar)
+        if sel_col: mask &= df['color'].isin(sel_col)
+        if q: mask &= df.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)
+        df_filtrado = df[mask]
     else:
-        st.warning("Selecciona productos con imagen para ver la simulación.")
+        df_filtrado = pd.DataFrame()
 
-def consultor_ia(df):
-    st.header("🤖 Consultor Ledisa AI")
+    st.markdown(f"**Mostrando {len(df_filtrado)} productos**")
+    st.markdown("---")
     
-    if "gemini" not in st.secrets:
-        st.error("⚠️ Falta API Key Gemini")
-        return
-        
-    try:
-        genai.configure(api_key=st.secrets["gemini"]["api_key"])
-        model = genai.GenerativeModel('models/gemini-flash-latest')
-    except: return
+    if not df_filtrado.empty:
+        cols = st.columns(3)
+        for i, row in enumerate(df_filtrado.itertuples()):
+            with cols[i % 3]:
+                st.container()
+                imgs = str(row.imagen).split(",") if pd.notna(row.imagen) and str(row.imagen).strip() else []
+                imgs = [url.strip() for url in imgs if len(url.strip()) > 5]
 
-    q = st.chat_input("¿Qué necesita el cliente?")
-    if q:
-        with st.chat_message("user"): st.write(q)
-        with st.chat_message("assistant"):
-            with st.spinner("Buscando en base de datos..."):
-                # Contexto optimizado
-                inv = df[['id', 'nombre', 'tags_ia', 'precio', 'marca']].head(80).to_dict('records')
-                prompt = f"""
-                Recomienda 3 productos para: "{q}".
-                Inventario: {json.dumps(inv)}
-                Responde JSON: {{ "recomendaciones": [ {{ "id": "ID", "razon": "txt" }} ], "consejo": "txt" }}
-                """
-                try:
-                    res = model.generate_content(prompt)
-                    txt = res.text.replace("```json", "").replace("```", "").strip()
-                    if "{" in txt: txt = txt[txt.find("{"):txt.rfind("}")+1]
-                    data = json.loads(txt)
-                    
-                    cols = st.columns(3)
-                    for i, r in enumerate(data.get('recomendaciones', [])):
-                        # Búsqueda robusta por ID (string)
-                        prod = df[df['id'].astype(str) == str(r['id'])]
-                        
-                        with cols[i%3]:
-                            if not prod.empty:
-                                row = prod.iloc[0]
-                                imgs = str(row['imagen']).split(",")
-                                if imgs[0]: 
-                                    im = procesar_imagen_nitidez(imgs[0])
-                                    if im: st.image(im)
-                                st.markdown(f"**{row['nombre']}**")
-                                st.caption(r['razon'])
-                                st.write(f"**S/. {row['precio']}**")
-                            else:
-                                st.warning(f"Producto {r['id']} no hallado.")
-                    
-                    if 'consejo' in data: st.info(f"💡 {data['consejo']}")
-                except: st.error("Error conectando con la IA.")
-
-# --- 5. INTERFAZ PRINCIPAL ---
-def main():
-    if 'auth' not in st.session_state: st.session_state.auth = False
-    
-    with st.sidebar:
-        try:
-            st.image("logo_ledisa.png", use_container_width=True)
-        except:
-            st.title("🏭 LEDISA")
-        st.markdown("---")
-
-        st.title("🔐 Acceso")
-        if not st.session_state.auth:
-            pwd = st.text_input("Contraseña", type="password")
-            if st.button("Entrar"):
-                if pwd == st.secrets["general"]["password"]:
-                    st.session_state.auth = True
-                    st.rerun()
-                else: st.error("Incorrecto")
-            return
-        
-        if st.button("Cerrar Sesión"):
-            st.session_state.auth = False
-            st.rerun()
-
-    st.title("🏭 Sistema Ledisa v4.0 (Cloud)")
-    df = obtener_datos() # Ahora viene de Supabase
-    
-    menu = st.sidebar.radio("Menú:", 
-        ["Ver Inventario", "Registrar Nuevo", "Editar Producto", "Actualizar Stock", 
-         "Calculadora Obra", "Simulador 2.5D", "Dashboard", "Consultor IA"])
-
-    # 1. VER INVENTARIO (NIVEL E-COMMERCE)
-    if menu == "Ver Inventario":
-        st.subheader("🛒 Catálogo de Productos")
-        
-        # --- SECCIÓN DE FILTROS ---
-        with st.expander("🔎 Filtros Avanzados", expanded=True):
-            f1, f2, f3 = st.columns(3)
-            
-            # Extraer valores únicos dinámicamente de la base de datos
-            categorias_disp = sorted([c for c in df['categoria'].unique() if str(c).strip()])
-            marcas_disp = sorted([m for m in df['marca'].unique() if str(m).strip()])
-            
-            # Calcular precios máximos y mínimos reales del inventario
-            min_p = float(df['precio'].min()) if not df.empty else 0.0
-            max_p = float(df['precio'].max()) if not df.empty else 1000.0
-            if min_p == max_p: max_p = min_p + 1.0 # Evitar error si todo cuesta igual
-            
-            # Widgets visuales
-            sel_cat = f1.multiselect("Categoría", categorias_disp, placeholder="Todas las categorías")
-            sel_mar = f2.multiselect("Marca", marcas_disp, placeholder="Todas las marcas")
-            rango_precio = f3.slider("Rango de Precio (S/.)", min_value=min_p, max_value=max_p, value=(min_p, max_p))
-            
-            # Buscador tradicional como respaldo
-            q = st.text_input("Búsqueda rápida (Nombre o Código):", placeholder="Ej. Gris, Nápoles...")
-
-        # --- MOTOR DE FILTRADO PANDAS (LÓGICA VECTORIZADA) ---
-        df_filtrado = df.copy()
-        
-        if sel_cat:
-            df_filtrado = df_filtrado[df_filtrado['categoria'].isin(sel_cat)]
-        if sel_mar:
-            df_filtrado = df_filtrado[df_filtrado['marca'].isin(sel_mar)]
-            
-        df_filtrado = df_filtrado[
-            (df_filtrado['precio'] >= rango_precio[0]) & 
-            (df_filtrado['precio'] <= rango_precio[1])
-        ]
-        
-        if q:
-            df_filtrado = df_filtrado[df_filtrado.astype(str).apply(lambda x: x.str.contains(q, case=False)).any(axis=1)]
-
-        # --- RENDERIZADO DE RESULTADOS ---
-        st.markdown(f"**Mostrando {len(df_filtrado)} productos encontrados**")
-        st.markdown("---")
-        
-        if not df_filtrado.empty:
-            cols = st.columns(3)
-            for i, row in df_filtrado.iterrows():
-                with cols[i%3]:
-                    st.container()
-                    
-                    # Lógica de imágenes blindada
-                    imgs = str(row['imagen']).split(",") if row['imagen'] else []
-                    imgs = [url.strip() for url in imgs if url and len(url.strip()) > 5]
-
-                    if len(imgs) > 0:
-                        url_p = imgs[0]
-                        url_a = imgs[1] if len(imgs) > 1 else None
-
-                        if url_p and url_a:
-                            t1, t2 = st.tabs(["Pieza", "Ambiente"])
-                            with t1: 
-                                im = procesar_imagen_nitidez(url_p)
-                                st.image(im or url_p)
-                            with t2:
-                                im = procesar_imagen_nitidez(url_a)
-                                st.image(im or url_a)
-                        else:
-                            im = procesar_imagen_nitidez(url_p)
-                            st.image(im or url_p)
-                    else:
-                        st.info("🖼️ Sin imagen")
-                        
-                    st.markdown(f"**{row['nombre']}**")
-                    st.caption(f"{row['id']} | {row['marca']}")
-                    
-                    c1, c2 = st.columns(2)
-                    c1.metric("Stock", row['stock'])
-                    c2.metric("Precio", f"S/. {row['precio']}")
-                    
-                    if row['m2_caja'] > 0:
-                        st.success(f"📦 Total: {row['total_m2']:.2f} m²")
-                    
-                    st.divider()
-        else:
-            st.warning("⚠️ No se encontraron productos con estos filtros. Prueba ampliando el rango de precio o quitando categorías.")
-            
-    # 2. REGISTRAR (INSERTAR EN SUPABASE)
-    elif menu == "Registrar Nuevo":
-        st.subheader("📝 Nuevo Producto")
-        cat = st.selectbox("Categoría:", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"])
-        
-        with st.form("reg"):
-            c1, c2 = st.columns(2)
-            id_z = c1.text_input("Código/ID *")
-            nom = c2.text_input("Nombre *")
-            marca = st.selectbox("Marca", ["Celima", "Trebol", "Generico", "Otro"])
-            
-            # Dinamismo
-            fmt_val, m2_val = "-", 0.0
-            c3, c4 = st.columns(2)
-            if cat in ["Mayólica", "Porcelanato", "Piso", "Pared"]:
-                fmt_val = c3.text_input("Formato (cm)")
-                m2_val = c4.number_input("m² por Caja", min_value=0.01)
-            else:
-                fmt_val = c3.text_input("Peso/Modelo")
-            
-            c5, c6 = st.columns(2)
-            stk = c5.number_input("Stock Inicial", min_value=0, step=1)
-            prc = c6.number_input("Precio S/.", min_value=0.0)
-            
-            f1 = st.file_uploader("Foto Pieza")
-            f2 = st.file_uploader("Foto Ambiente (Opcional)")
-            
-            if st.form_submit_button("Guardar en Nube"):
-                if not id_z or not nom: 
-                    st.error("Faltan datos obligatorios")
+                if imgs:
+                    st.image(procesar_imagen_nitidez(imgs[0]) or imgs[0], use_container_width=True)
                 else:
-                    # Verificar duplicado
-                    existe = supabase.table("inventario").select("id").eq("id", id_z).execute()
-                    if existe.data:
-                        st.error("❌ Ese ID ya existe.")
+                    st.info("🖼️ Sin foto")
+                    
+                st.markdown(f"**{row.nombre}**")
+                color_tag = f" | Color: {row.color}" if pd.notna(row.color) and str(row.color).strip() else ""
+                st.caption(f"{row.id} | {row.marca}{color_tag}")
+                
+                c1, c2 = st.columns(2)
+                c1.metric("Stock", row.stock)
+                c2.metric("Precio", f"S/. {row.precio}")
+                st.divider()
+    else:
+        st.warning("⚠️ No se encontraron productos.")
+
+# ==========================================
+# 2. REGISTRAR NUEVO
+# ==========================================
+elif menu == "Registrar Nuevo":
+    st.subheader("➕ Registrar Nuevo Producto")
+    with st.form("form_nuevo_producto", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        with c1:
+            codigo = st.text_input("Código (ID)*")
+            nombre = st.text_input("Nombre / Descripción*")
+            categoria = st.selectbox("Categoría*", ["Porcelanato", "Cerámico", "Sanitario", "Pegamento", "Varillas", "Otros"])
+            marca = st.text_input("Marca*")
+            color = st.text_input("Color / Acabado (Opcional)")
+        
+        with c2:
+            precio = st.number_input("Precio Venta (S/.)*", min_value=0.0, step=0.5)
+            stock = st.number_input("Stock Inicial*", min_value=0, step=1)
+            m2_caja = st.number_input("m² por Caja (0 si no aplica)*", min_value=0.0, step=0.01)
+            imagen = st.text_area("URLs Imágenes (Separadas por coma)")
+            
+        if st.form_submit_button("Guardar Producto", type="primary"):
+            if not codigo or not nombre or not marca:
+                st.error("⚠️ Los campos con asterisco (*) son obligatorios.")
+            else:
+                nuevo = {
+                    "id": codigo.strip(), "nombre": nombre.strip(), "categoria": categoria.strip(),
+                    "marca": marca.strip(), "precio": float(precio), "stock": int(stock),
+                    "m2_caja": float(m2_caja), "imagen": imagen.strip() if imagen.strip() else None,
+                    "color": color.strip() if color.strip() else None 
+                }
+                try:
+                    supabase.table('inventario').insert(nuevo).execute()
+                    st.success(f"✅ Producto guardado.")
+                    limpiar_cache()
+                except Exception as e:
+                    st.error(f"❌ Error BD: {e}")
+
+# ==========================================
+# 3. EDITAR PRODUCTO
+# ==========================================
+elif menu == "Editar Producto":
+    st.subheader("✏️ Modificar o Eliminar Producto")
+if not df.empty:
+        # Creamos una lista combinada "ID - Nombre"
+        opciones = [""] + (df['id'].astype(str) + " - " + df['nombre']).tolist()
+        seleccion = st.selectbox("Buscar Producto a Editar/Eliminar:", opciones)
+        
+        if seleccion:
+            # Extraemos solo el ID (lo que está antes del guion) para buscar en la BD
+            id_selec = seleccion.split(" - ")[0].strip()
+            p = df[df['id'] == id_selec].iloc[0]
+            
+            with st.form("form_editar_producto"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    n_nombre = st.text_input("Nombre", p['nombre'])
+                    n_cat = st.text_input("Categoría", p['categoria'])
+                    n_marca = st.text_input("Marca", p['marca'])
+                    n_color = st.text_input("Color", p['color'] if pd.notna(p['color']) else "")
+                with c2:
+                    n_precio = st.number_input("Precio", value=float(p['precio']), min_value=0.0, step=0.5)
+                    n_stock = st.number_input("Stock", value=int(p['stock']), step=1)
+                    n_m2 = st.number_input("m² Caja", value=float(p['m2_caja'] if pd.notna(p['m2_caja']) else 0.0), step=0.01)
+                    n_img = st.text_area("URLs Imágenes", p['imagen'] if pd.notna(p['imagen']) else "")
+                
+                col_btn1, col_btn2 = st.columns(2)
+                guardar = col_btn1.form_submit_button("💾 Guardar Cambios", type="primary")
+                eliminar = col_btn2.form_submit_button("🗑️ Eliminar Producto")
+                
+                if guardar:
+                    actualizado = {
+                        "nombre": n_nombre.strip(), "categoria": n_cat.strip(), "marca": n_marca.strip(),
+                        "precio": float(n_precio), "stock": int(n_stock), "m2_caja": float(n_m2),
+                        "imagen": n_img.strip() if n_img.strip() else None,
+                        "color": n_color.strip() if n_color.strip() else None
+                    }
+                    supabase.table('inventario').update(actualizado).eq('id', id_selec).execute()
+                    st.success("✅ Actualizado.")
+                    limpiar_cache()
+                    st.rerun()
+                
+                if eliminar:
+                    supabase.table('inventario').delete().eq('id', id_selec).execute()
+                    st.success("✅ Eliminado.")
+                    limpiar_cache()
+                    st.rerun()
+
+# ==========================================
+# 4. ACTUALIZAR STOCK (Carga Rápida)
+# ==========================================
+elif menu == "Actualizar Stock":
+    st.subheader("📦 Ajuste Rápido de Inventario")
+    st.caption("Usa esta pantalla para sumar o restar stock rápidamente cuando llega mercadería o hay mermas.")
+if not df.empty:
+        opciones = [""] + (df['id'].astype(str) + " - " + df['nombre']).tolist()
+        seleccion = st.selectbox("Selecciona Producto:", opciones)
+        
+        if seleccion:
+            id_selec = seleccion.split(" - ")[0].strip()
+            p = df[df['id'] == id_selec].iloc[0]
+            
+            st.info(f"**{p['nombre']}** | Stock Actual: **{p['stock']}** unidades")
+            
+            with st.form("form_stock"):
+                operacion = st.radio("Operación", ["Sumar (Entrada)", "Restar (Salida/Venta)"])
+                cantidad = st.number_input("Cantidad", min_value=1, step=1)
+                
+                if st.form_submit_button("Confirmar Ajuste", type="primary"):
+                    nuevo_stock = p['stock'] + cantidad if operacion == "Sumar (Entrada)" else p['stock'] - cantidad
+                    if nuevo_stock < 0:
+                        st.error("El stock no puede ser negativo.")
                     else:
-                        # Subir fotos
-                        u1 = subir_a_supabase(f1.getvalue(), f1.name, f1.type) if f1 else ""
-                        u2 = subir_a_supabase(f2.getvalue(), f2.name, f2.type) if f2 else ""
-                        u_final = f"{u1},{u2}" if u2 else u1
-                        
-                        # INSERTAR EN BASE DE DATOS
-                        data = {
-                            "id": id_z, "nombre": nom, "categoria": cat, "marca": marca,
-                            "formato": fmt_val, "m2_caja": m2_val, "calidad": "Estándar",
-                            "stock": int(stk), "precio": float(prc), "imagen": u_final,
-                            "tags_ia": f"{cat} {marca} {fmt_val}" # Auto-tag básico
-                        }
-                        supabase.table("inventario").insert(data).execute()
-                        st.success("✅ Guardado en Supabase!")
-                        time.sleep(1)
+                        supabase.table('inventario').update({"stock": int(nuevo_stock)}).eq('id', id_selec).execute()
+                        st.success(f"✅ Stock actualizado a {nuevo_stock}.")
+                        limpiar_cache()
                         st.rerun()
 
-# ---------------------------------------------------------
-    # 3. EDITAR PRODUCTO (AHORA CON GESTIÓN DE FOTOS)
-    # ---------------------------------------------------------
-    elif menu == "Editar Producto":
-        st.subheader("✏️ Editar Detalles y Fotos")
+# ==========================================
+# 5. CALCULADORA OBRA
+# ==========================================
+elif menu == "Calculadora Obra":
+    st.subheader("📏 Calculadora de Cajas y Mermas")
+    if not df.empty:
+        df_pisos = df[df['m2_caja'] > 0] # Solo productos que se venden por m2
+        id_selec = st.selectbox("Cerámico/Porcelanato:", [""] + df_pisos['nombre'].tolist())
         
-        # Selector de producto
-        opciones = df.apply(lambda x: f"{x['id']} | {x['nombre']}", axis=1)
-        sel = st.selectbox("Buscar producto a editar:", opciones)
-        
-        if sel:
-            id_sel = sel.split(" | ")[0]
-            # 1. Recuperamos los datos frescos de Supabase
-            try:
-                data_list = supabase.table("inventario").select("*").eq("id", id_sel).execute().data
-                if not data_list:
-                    st.error("Error recuperando producto.")
-                    st.stop()
-                item = data_list[0]
-            except Exception as e:
-                st.error(f"Error de conexión: {e}")
-                st.stop()
+        if id_selec:
+            p = df_pisos[df_pisos['nombre'] == id_selec].iloc[0]
+            st.write(f"**Rendimiento por caja:** {p['m2_caja']} m²")
             
-            # Formulario de Edición
-            with st.form("edit_form"):
-                c1, c2 = st.columns(2)
-                n_nom = c1.text_input("Nombre", item['nombre'])
-                n_cat = c2.selectbox("Categoría", ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"], index=["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"].index(item['categoria']) if item['categoria'] in ["Mayólica", "Porcelanato", "Piso", "Pared", "Pegamento", "Fragua", "Sanitario", "Grifería"] else 0)
-                
-                c3, c4 = st.columns(2)
-                n_prc = c3.number_input("Precio (S/.)", value=float(item['precio']))
-                n_m2 = c4.number_input("m² por Caja", value=float(item['m2_caja']))
+            area = st.number_input("Área a cubrir (m²):", min_value=0.0, step=0.5)
+            merma = st.slider("Porcentaje de Merma (Desperdicio por cortes):", 0, 15, 5)
+            
+            if area > 0:
+                area_total = area * (1 + (merma/100))
+                cajas_exactas = area_total / p['m2_caja']
+                import math
+                cajas_comprar = math.ceil(cajas_exactas)
+                costo_total = cajas_comprar * p['precio']
                 
                 st.markdown("---")
-                st.markdown("### 📸 Actualizar Imágenes")
-                st.info("Sube fotos nuevas SOLO si quieres reemplazar las actuales.")
-                
-                col_f1, col_f2 = st.columns(2)
-                new_f1 = col_f1.file_uploader("Nueva Foto Pieza (Técnica)", type=["jpg", "png", "jpeg"])
-                new_f2 = col_f2.file_uploader("Nueva Foto Ambiente (Inspiración)", type=["jpg", "png", "jpeg"])
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Área Real + Merma", f"{area_total:.2f} m²")
+                c2.metric("Cajas a Vender", f"{cajas_comprar} cajas")
+                c3.metric("Presupuesto", f"S/. {costo_total:.2f}")
 
-                if st.form_submit_button("💾 Guardar Cambios Completos"):
-                    # Lógica de Actualización de Imágenes
-                    urls_actuales = str(item['imagen']).split(",") if item['imagen'] else []
-                    url_final_1 = urls_actuales[0] if len(urls_actuales) > 0 else ""
-                    url_final_2 = urls_actuales[1] if len(urls_actuales) > 1 else ""
-
-                    # Si subió foto nueva 1, la reemplazamos
-                    if new_f1:
-                        st.caption("Subiendo foto pieza...")
-                        url_final_1 = subir_a_supabase(new_f1.getvalue(), f"{id_sel}_pieza", new_f1.type)
-                    
-                    # Si subió foto nueva 2, la reemplazamos
-                    if new_f2:
-                        st.caption("Subiendo foto ambiente...")
-                        url_final_2 = subir_a_supabase(new_f2.getvalue(), f"{id_sel}_amb", new_f2.type)
-                    
-                    # Reconstruimos la cadena de imágenes
-                    imgs_db = f"{url_final_1},{url_final_2}" if url_final_2 else url_final_1
-                    
-                    # Actualizamos en Supabase
-                    supabase.table("inventario").update({
-                        "nombre": n_nom,
-                        "categoria": n_cat,
-                        "precio": n_prc, 
-                        "m2_caja": n_m2,
-                        "imagen": imgs_db
-                    }).eq("id", id_sel).execute()
-                    
-                    st.success("✅ Producto actualizado correctamente")
-                    time.sleep(1.5)
-                    st.rerun()
-
-    # 4. ACTUALIZAR STOCK
-    elif menu == "Actualizar Stock":
-        st.subheader("📦 Ajuste Rápido")
-        opciones = df.apply(lambda x: f"{x['id']} | {x['nombre']}", axis=1)
-        sel = st.selectbox("Producto:", opciones)
+# ==========================================
+# 6. DASHBOARD (Inteligencia de Negocio)
+# ==========================================
+elif menu == "Dashboard":
+    st.subheader("📊 Inteligencia Comercial LEDISA")
+    if not df.empty:
+        total_items = len(df)
+        df['valor_total'] = df['precio'] * df['stock']
+        capital_inmovilizado = df['valor_total'].sum()
+        productos_criticos = df[df['stock'] < 10]
         
-        if sel:
-            id_sel = sel.split(" | ")[0]
-            item = supabase.table("inventario").select("stock").eq("id", id_sel).execute().data[0]
-            actual = item['stock']
-            
-            st.metric("Stock en Sistema", actual)
-            ajuste = st.number_input("Sumar / Restar:", step=1, value=0)
-            
-            if st.button("Aplicar Cambio"):
-                nuevo = actual + ajuste
-                supabase.table("inventario").update({"stock": nuevo}).eq("id", id_sel).execute()
-                st.success(f"Nuevo stock: {nuevo}")
-                time.sleep(0.5)
-                st.rerun()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Variedad de Productos", total_items)
+        c2.metric("Capital en Almacén", f"S/. {capital_inmovilizado:,.2f}")
+        c3.metric("Alertas Quiebre Stock", len(productos_criticos), delta="- Bajo 10 unidades", delta_color="inverse")
+        
+        st.markdown("---")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.write("**Distribución del Inventario por Categoría**")
+            conteo_cat = df['categoria'].value_counts()
+            st.bar_chart(conteo_cat)
+        
+        with col2:
+            st.write("⚠️ **Top 10 Productos por Agotarse**")
+            st.dataframe(productos_criticos[['id', 'nombre', 'stock']].sort_values('stock').head(10), use_container_width=True)
 
-    # Módulos
-    elif menu == "Calculadora Obra": calculadora_obra(df)
-    elif menu == "Dashboard": dashboard_gerencial(df)
-    elif menu == "Simulador 2.5D": simulador_25d(df)
-    elif menu == "Consultor IA": consultor_ia(df)
-
-if __name__ == "__main__":
-    main()
+# ==========================================
+# 7. CONSULTOR IA
+# ==========================================
+elif menu == "Consultor IA":
+    st.subheader("🤖 Asistente de Ventas y Diseño")
+    st.info("Espacio reservado para integración con API de Inteligencia Artificial.")
+    prompt = st.text_area("Escribe la consulta del cliente:", placeholder="Ej. ¿Qué colores de porcelanato combinan con paredes grises?")
+    if st.button("Consultar IA"):
+        st.warning("La clave API de tu IA aún no está configurada en este bloque.") 
